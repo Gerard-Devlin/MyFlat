@@ -7,11 +7,13 @@ MyFlat captures, flattens and organizes scanned pages on your device. No account
 ## Features
 
 - Single-page and two-page camera capture, autofocus, flash, timers and automatic capture.
+- Full-resolution capture, editing and export.
 - Batch image and PDF import.
 - Page flattening, color enhancement, finger removal, text-line straightening and handwriting removal.
 - Perspective cropping, rotation, paper ratios, zoom, original comparison and an eraser with undo.
 - Folders, multi-page documents, search, page ordering, trash and restore.
 - PDF, JPEG and ZIP export through Android's file picker and share sheet.
+- Local document backups and restore.
 
 ## Build
 

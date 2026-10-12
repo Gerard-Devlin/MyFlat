@@ -244,7 +244,10 @@ public final class SmokeInstrumentation extends Instrumentation {
     String dualDoc = store.createDocument(1, "双页测试临时文档");
     require(Importer.add(context, store, dualDoc, fixture, dual) == 2, "双页切分生成两张独立页面");
     waitReady(dualDoc, 45000);
-    require(store.page(store.pages(dualDoc).get(0).id).width < fixture.getWidth(), "双页结果宽度正确");
+    DocumentStore.Page splitPage = store.page(store.pages(dualDoc).get(0).id);
+    require(
+        (long) splitPage.width * splitPage.height < (long) fixture.getWidth() * fixture.getHeight(),
+        "双页各自保存页面窗口，不重复保存完整跨页图");
     store.permanentlyDelete(dualDoc);
     store.trash(doc, true);
     require(store.documents(folder, "MyFlat 集成验收", false).isEmpty(), "文档放入回收站后移出资料库");
@@ -290,24 +293,70 @@ public final class SmokeInstrumentation extends Instrumentation {
     waitReady(scanned, 90000);
     DocumentStore.Page result = store.page(scanPage);
     require(result.width > 500 && result.width < 900 && result.height > 900, "完整书页扫描输出尺寸正确");
-    File stages = new File(context.getExternalFilesDir(null), "guide-stages");
-    stages.mkdirs();
-    ScanEngine.Result example =
-        new ScanEngine(context)
-            .process(
-                fixture,
-                new ScanEngine.Options(),
-                (name, percent) -> {},
-                (name, image) -> {
-                  try (OutputStream out = new FileOutputStream(new File(stages, name + ".jpg"))) {
-                    image.compress(Bitmap.CompressFormat.JPEG, 95, out);
-                  }
-                });
-    require(
-        example.image.getWidth() == result.width && example.image.getHeight() == result.height,
-        "引导示例的每一步来自完整扫描流程");
-    if (example.image != fixture) example.image.recycle();
+    testFullResolution(fixture);
     fixture.recycle();
+  }
+
+  private void testFullResolution(Bitmap fixture) throws Exception {
+    android.util.Size max =
+        CameraActivity.largest(
+            new android.util.Size[] {
+              new android.util.Size(3200, 2400), new android.util.Size(8000, 6000)
+            },
+            new android.util.Size[] {new android.util.Size(12000, 9000)});
+    require(max.getWidth() == 12000 && max.getHeight() == 9000, "拍照按像素面积选择最高分辨率，包含高分辨率输出列表");
+    require(
+        ScanSettings.defaults(context).maxEdge == 0 && new ScanEngine.Options().maxEdge == 0,
+        "扫描默认不设置缩图上限");
+    File raw = new File(context.getCacheDir(), "high-resolution.jpg");
+    Bitmap large = Bitmap.createScaledBitmap(fixture, 3837, 5118, true);
+    try (OutputStream out = new FileOutputStream(raw)) {
+      large.compress(Bitmap.CompressFormat.JPEG, 100, out);
+    }
+    large.recycle();
+    String doc = store.createDocument(1, "高分辨率集成测试");
+    ScanSettings settings = new ScanSettings();
+    String id;
+    try (InputStream in = new FileInputStream(raw)) {
+      id = store.addSource(doc, in, settings);
+    }
+    require(hash(raw).equals(hash(store.file(store.page(id).original))), "拍摄原文件逐字节保留，不缩图也不重新压缩");
+    ScanEngine.Result scan;
+    try (ScanSource source = new ScanSource(raw, 1, 0, 0, 0, 1, 1, 0)) {
+      require(source.width == 3837 && source.height == 5118, "分区读取保留完整输入尺寸");
+      scan = new ScanEngine(context).process(source, settings.engine(), (stage, p) -> {}, null);
+    }
+    require(scan.image.getHeight() > 3000 && scan.image.getWidth() > 1500, "展平和增强输出超过旧的2400像素上限");
+    DocumentStore.Page page = store.page(id);
+    store.complete(page, scan.image, 100);
+    scan.image.recycle();
+    page = store.page(id);
+    File pdf =
+        Exporter.create(
+            context,
+            "高分辨率",
+            Collections.singletonList(page),
+            Exporter.Format.PDF,
+            false,
+            false,
+            4,
+            (done, total) -> {});
+    try (ParcelFileDescriptor fd =
+            ParcelFileDescriptor.open(pdf, ParcelFileDescriptor.MODE_READ_ONLY);
+        PdfRenderer renderer = new PdfRenderer(fd);
+        PdfRenderer.Page pdfPage = renderer.openPage(0)) {
+      require(
+          pdfPage.getWidth() == page.width && pdfPage.getHeight() == page.height,
+          "最高质量PDF保留完整扫描尺寸");
+    }
+    try (ScanSource rotated = new ScanSource(raw, 6, 0, 0, 0, 1, 1, 0)) {
+      require(rotated.width == 5118 && rotated.height == 3837, "全尺寸原图的EXIF横竖方向正确");
+      Bitmap preview = rotated.preview(600);
+      require(preview.getWidth() > preview.getHeight(), "旋转后的取页预览方向一致");
+      preview.recycle();
+    }
+    store.permanentlyDelete(doc);
+    raw.delete();
   }
 
   private void testCameraGuidance() throws Exception {
@@ -330,7 +379,7 @@ public final class SmokeInstrumentation extends Instrumentation {
               clickText(guide.getWindow().getDecorView(), "下一步");
               require(guide.step() == step + 1, "引导进入第 " + (step + 2) + " 页");
             }
-            clickText(guide.getWindow().getDecorView(), "开始扫描");
+            clickText(guide.getWindow().getDecorView(), "关闭");
             require(prefs.getBoolean("scan_guide_seen", false), "完成引导记录首次进入状态");
             require(
                 findText(camera.getWindow().getDecorView(), "正在寻找扫描目标…") != null,
@@ -351,9 +400,14 @@ public final class SmokeInstrumentation extends Instrumentation {
             clickDescription(menu.getWindow().getDecorView(), audible ? "快门声音开" : "快门声音关");
             require(prefs.getBoolean("shutter_sound", false) != audible, "快门声音开关保存并更新状态");
             clickDescription(menu.getWindow().getDecorView(), audible ? "快门声音关" : "快门声音开");
-            clickDescription(menu.getWindow().getDecorView(), "扫描指南");
+            require(findText(menu.getWindow().getDecorView(), "  客户支持") != null, "相机更多保留客户支持入口");
+            menu.dismiss();
+            java.lang.reflect.Method replay =
+                CameraActivity.class.getDeclaredMethod("showGuide", int.class);
+            replay.setAccessible(true);
+            replay.invoke(camera, 0);
             guide = (ScanGuideDialog) dialogField.get(camera);
-            require(guide != null && guide.isShowing() && guide.step() == 0, "更多中可重新查看引导");
+            require(guide != null && guide.isShowing(), "可重新查看完整扫描引导");
             guide.dismiss();
             clickDescription(camera.getWindow().getDecorView(), "选择保存文件夹");
             menu = (Dialog) menuField.get(camera);

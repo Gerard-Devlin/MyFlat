@@ -29,6 +29,19 @@ public final class Exporter {
       boolean a4,
       Progress progress)
       throws IOException {
+    return create(c, title, pages, format, a4, false, 4, progress);
+  }
+
+  public static File create(
+      Context c,
+      String title,
+      List<DocumentStore.Page> pages,
+      Format format,
+      boolean a4,
+      boolean grayscale,
+      int quality,
+      Progress progress)
+      throws IOException {
     if (pages.isEmpty()) throw new IOException("请选择已完成的页面");
     DocumentStore store = MyFlatApp.of(c).store;
     for (DocumentStore.Page page : pages)
@@ -37,7 +50,12 @@ public final class Exporter {
     File folder = new File(c.getCacheDir(), "exports");
     if (!folder.isDirectory() && !folder.mkdirs()) throw new IOException("无法创建导出目录");
     String extension = format == Format.PDF ? ".pdf" : format == Format.ZIP ? ".zip" : ".jpg";
-    File result = new File(folder, safeName(title) + "-" + System.currentTimeMillis() + extension);
+    folder = new File(folder, Long.toString(System.nanoTime()));
+    if (!folder.mkdirs()) throw new IOException("无法创建导出目录");
+    String base = safeName(title);
+    if (base.toLowerCase(Locale.ROOT).endsWith(extension))
+      base = base.substring(0, base.length() - extension.length());
+    File result = new File(folder, base + extension);
     try {
       if (format == Format.JPEG) {
         try (InputStream in = new FileInputStream(store.file(pages.get(0).result));
@@ -61,16 +79,27 @@ public final class Exporter {
         PdfDocument pdf = new PdfDocument();
         try {
           for (int i = 0; i < pages.size(); i++) {
-            Bitmap bitmap = Images.decode(store.file(pages.get(i).result), 3600);
+            int edge = new int[] {600, 1000, 1600, 2400, 0}[Math.max(0, Math.min(4, quality))];
+            Bitmap bitmap = Images.decode(store.file(pages.get(i).result), edge);
+            if (edge > 0 && Math.max(bitmap.getWidth(), bitmap.getHeight()) > edge) {
+              float resize = (float) edge / Math.max(bitmap.getWidth(), bitmap.getHeight());
+              Bitmap scaled =
+                  Bitmap.createScaledBitmap(
+                      bitmap,
+                      Math.max(1, Math.round(bitmap.getWidth() * resize)),
+                      Math.max(1, Math.round(bitmap.getHeight() * resize)),
+                      true);
+              if (scaled != bitmap) bitmap.recycle();
+              bitmap = scaled;
+            }
             int w, h;
             if (a4) {
               boolean landscape = bitmap.getWidth() > bitmap.getHeight();
               w = landscape ? 842 : 595;
               h = landscape ? 595 : 842;
             } else {
-              float scale = Math.min(1f, 1440f / Math.max(bitmap.getWidth(), bitmap.getHeight()));
-              w = Math.max(1, Math.round(bitmap.getWidth() * scale));
-              h = Math.max(1, Math.round(bitmap.getHeight() * scale));
+              w = bitmap.getWidth();
+              h = bitmap.getHeight();
             }
             PdfDocument.Page page =
                 pdf.startPage(new PdfDocument.PageInfo.Builder(w, h, i + 1).create());
@@ -79,6 +108,11 @@ public final class Exporter {
             float scale = Math.min((float) w / bitmap.getWidth(), (float) h / bitmap.getHeight());
             float dw = bitmap.getWidth() * scale, dh = bitmap.getHeight() * scale;
             Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+            if (grayscale) {
+              ColorMatrix matrix = new ColorMatrix();
+              matrix.setSaturation(0);
+              paint.setColorFilter(new ColorMatrixColorFilter(matrix));
+            }
             canvas.drawBitmap(
                 bitmap,
                 null,

@@ -10,9 +10,7 @@ import android.os.*;
 import android.view.*;
 import android.widget.*;
 import java.io.*;
-import java.text.SimpleDateFormat;
 import java.util.*;
-import java.util.concurrent.Future;
 
 /** Folder/document navigation. Processing and file IO live outside the activity. */
 public final class MainActivity extends Activity {
@@ -43,6 +41,7 @@ public final class MainActivity extends Activity {
   @Override
   public void onCreate(Bundle state) {
     super.onCreate(state);
+    trash = getIntent().getBooleanExtra("trash", false);
     store = MyFlatApp.of(this).store;
     if (state != null) {
       documentId = state.getString("document");
@@ -116,7 +115,7 @@ public final class MainActivity extends Activity {
     documentId = intent.getStringExtra("document");
     selecting = false;
     selected.clear();
-    trash = false;
+    trash = intent.getBooleanExtra("trash", false);
     refresh();
     consumeImport();
   }
@@ -148,7 +147,7 @@ public final class MainActivity extends Activity {
     if (documentId != null && document == null) documentId = null;
     root = Ui.root(this);
     LinearLayout header = Ui.row(this);
-    Ui.padding(header, 4, 0);
+    Ui.padding(header, 0, 0);
     header.addView(Ui.iconButton(this, "back", "返回", this::back));
     String title =
         selecting
@@ -175,7 +174,9 @@ public final class MainActivity extends Activity {
       header.addView(heading, hp);
     }
     if (!trash) header.addView(Ui.iconButton(this, "search", "搜索文档名称", this::search));
-    header.addView(Ui.iconButton(this, "menu", "更多", this::menu));
+    View toolbarMenu = Ui.iconButton(this, "menu", "更多", () -> {});
+    toolbarMenu.setOnClickListener(v -> toolbarMenu(v));
+    header.addView(toolbarMenu);
     header.setElevation(Ui.dp(this, 1));
     root.addView(header);
     FrameLayout center = new FrameLayout(this);
@@ -229,16 +230,7 @@ public final class MainActivity extends Activity {
           });
       addAction(bar, "trash", "清空回收站", this::emptyTrash);
     } else {
-      addAction(bar, "import", "导入", this::pick);
-      if (folders) {
-        addAction(bar, "pdf", "创建 PDF", () -> export(Exporter.Format.PDF));
-        addAction(bar, "zip", "创建 ZIP", () -> export(Exporter.Format.ZIP));
-        addAction(bar, "trash", "删除", this::deleteAction);
-      } else {
-        addAction(bar, "share", "分享", () -> export(Exporter.Format.PDF));
-        addAction(bar, "pdf", "创建 PDF", () -> export(Exporter.Format.PDF));
-      }
-      addAction(bar, "more", "更多", this::menu);
+      ActionMenus.toolbar(this, bar, folders ? "library" : "pages", menuItems(), this::refresh);
     }
     root.addView(bar);
   }
@@ -276,7 +268,10 @@ public final class MainActivity extends Activity {
   }
 
   private void folders(LinearLayout content) {
-    List<DocumentStore.Folder> folders = store.folders();
+    List<DocumentStore.Folder> folders = new ArrayList<>(store.folders());
+    int sort = getPreferences(0).getInt("folder_sort", 3);
+    if (sort < 2) folders.sort(java.util.Comparator.comparing(f -> f.name));
+    if (sort == 1 || sort == 2) Collections.reverse(folders);
     LinearLayout row = null;
     for (int i = 0; i < folders.size(); i++) {
       if (i % 3 == 0) {
@@ -554,7 +549,11 @@ public final class MainActivity extends Activity {
   protected void onActivityResult(int request, int result, Intent data) {
     super.onActivityResult(request, result, data);
     if (result != RESULT_OK || data == null) return;
-    if (request == PICK) {
+    if (request == 103) {
+      folderId = data.getLongExtra("folder", 1);
+      documentId = null;
+      refresh();
+    } else if (request == PICK) {
       List<Uri> uris = new ArrayList<>();
       if (data.getClipData() != null)
         for (int i = 0; i < data.getClipData().getItemCount(); i++)
@@ -590,69 +589,14 @@ public final class MainActivity extends Activity {
   }
 
   private void importOptions(List<Uri> uris) {
-    LinearLayout body = Ui.column(this);
-    EditText title =
-        Ui.input(
-            this,
-            new SimpleDateFormat("扫描 yyyy-MM-dd HH.mm", Locale.getDefault()).format(new Date()),
-            "文档名称");
-    Ui.padding(title, 20, 4);
-    if (documentId == null) body.addView(title);
-    ScanSettings defaults = ScanSettings.defaults(this);
-    if (uris.stream().allMatch(u -> "application/pdf".equals(getContentResolver().getType(u)))) {
-      defaults.dewarp = false;
-      defaults.enhance = false;
-      defaults.fingers = false;
-    }
-    EffectsForm form = new EffectsForm(this, defaults, true);
-    body.addView(form.view);
-    ScrollView scroll = new ScrollView(this);
-    scroll.addView(body);
-    new AlertDialog.Builder(this)
-        .setTitle("导入 " + uris.size() + " 个文件")
-        .setView(scroll)
-        .setNegativeButton("取消", null)
-        .setPositiveButton(
-            "开始导入",
-            (d, w) -> {
-              if (documentId == null)
-                documentId =
-                    store.createDocument(folderId > 0 ? folderId : 1, title.getText().toString());
-              String target = documentId;
-              ProgressDialog progress = busy("准备导入");
-              Future<?> task =
-                  MyFlatApp.of(this)
-                      .io
-                      .submit(
-                          () -> {
-                            try {
-                              int count =
-                                  Importer.importUris(
-                                      this,
-                                      target,
-                                      uris,
-                                      form.value(),
-                                      message -> runOnUiThread(() -> progress.setMessage(message)));
-                              runOnUiThread(
-                                  () -> {
-                                    progress.dismiss();
-                                    refresh();
-                                    Toast.makeText(this, "已导入 " + count + " 页", Toast.LENGTH_SHORT)
-                                        .show();
-                                  });
-                            } catch (Exception ex) {
-                              runOnUiThread(
-                                  () -> {
-                                    progress.dismiss();
-                                    refresh();
-                                    Ui.error(this, ex);
-                                  });
-                            }
-                          });
-              progress.setButton(
-                  DialogInterface.BUTTON_NEGATIVE, "取消", (a, b) -> task.cancel(true));
-            })
-        .show();
+    ArrayList<String> values = new ArrayList<>();
+    for (Uri uri : uris) values.add(uri.toString());
+    startActivityForResult(
+        new Intent(this, ImportActivity.class)
+            .putStringArrayListExtra("uris", values)
+            .putExtra("folder", folderId)
+            .putExtra("document", documentId),
+        103);
   }
 
   private ProgressDialog busy(String message) {
@@ -663,121 +607,164 @@ public final class MainActivity extends Activity {
     return d;
   }
 
-  private void menu() {
-    if (selecting) {
+  private void moreActions() {
+    ActionMenus.show(
+        this,
+        folderId == 0 && documentId == null ? "library" : "pages",
+        menuItems(),
+        this::refresh);
+  }
+
+  private List<ActionMenus.Item> menuItems() {
+    boolean folders = folderId == 0 && documentId == null;
+    List<ActionMenus.Item> items = new ArrayList<>();
+    items.add(new ActionMenus.Item("import", "导入", this::pick));
+    if (!folders) items.add(new ActionMenus.Item("share", "分享", () -> export(Exporter.Format.PDF)));
+    items.add(new ActionMenus.Item("pdf", "创建 PDF", () -> export(Exporter.Format.PDF)));
+    if (folders)
+      items.add(new ActionMenus.Item("zip", "创建 ZIP", () -> export(Exporter.Format.ZIP)));
+    items.add(
+        new ActionMenus.Item("trash", "删除", selecting ? this::deleteSelected : this::deleteAction));
+    if (!folders)
+      items.add(new ActionMenus.Item("zip", "创建 ZIP", () -> export(Exporter.Format.ZIP)));
+    items.add(new ActionMenus.Item("rename", "改名", this::renameCurrent));
+    if (!folders) {
+      items.add(new ActionMenus.Item("folder", "移动", this::moveSelected));
+      items.add(new ActionMenus.Item("sort", "调整页序", this::reorder));
+    }
+    return items;
+  }
+
+  private void renameCurrent() {
+    if (folderId > 0) {
+      Ui.rename(
+          this,
+          "改名",
+          folderName(),
+          name -> {
+            store.renameFolder(folderId, name);
+            refresh();
+          });
+    } else {
+      List<DocumentStore.Folder> folders = store.folders();
       new AlertDialog.Builder(this)
+          .setTitle("选择文件夹")
           .setItems(
-              new String[] {"全选", "调整页序", "删除所选页面", "退出选择"},
+              folders.stream().map(f -> f.name).toArray(String[]::new),
               (d, w) -> {
-                if (w == 0) {
-                  for (DocumentStore.Page p : visiblePages()) selected.add(p.id);
-                  refresh();
-                } else if (w == 1) reorder();
-                else if (w == 2) deleteSelected();
-                else {
-                  selected.clear();
-                  selecting = false;
-                  refresh();
-                }
+                DocumentStore.Folder f = folders.get(w);
+                Ui.rename(
+                    this,
+                    "改名",
+                    f.name,
+                    name -> {
+                      store.renameFolder(f.id, name);
+                      refresh();
+                    });
               })
           .show();
+    }
+  }
+
+  private void moveSelected() {
+    if (!selecting || selected.isEmpty()) {
+      selecting = true;
+      refresh();
       return;
     }
-    if (documentId == null && folderId > 0) {
-      new AlertDialog.Builder(this)
-          .setTitle(folderName())
-          .setItems(
-              new String[] {"选择页面", "文档管理", "创建 ZIP", "扫描设置"},
-              (d, w) -> {
-                if (w == 0) {
-                  selecting = true;
-                  refresh();
-                } else if (w == 1) {
-                  List<DocumentStore.Document> docs = store.documents(folderId, "", false);
-                  new AlertDialog.Builder(this)
-                      .setTitle("文档管理")
-                      .setItems(
-                          docs.stream().map(doc -> doc.title).toArray(String[]::new),
-                          (a, b) -> documentMenu(docs.get(b)))
-                      .show();
-                } else if (w == 2) export(Exporter.Format.ZIP);
-                else settings();
-              })
-          .show();
-      return;
+    FolderPicker.show(
+        this,
+        0,
+        id -> {
+          store.movePages(new ArrayList<>(selected), id);
+          selecting = false;
+          selected.clear();
+          refresh();
+        });
+  }
+
+  private void toolbarMenu(View anchor) {
+    PopupMenu popup = new PopupMenu(this, anchor);
+    if (folderId == 0 && documentId == null) {
+      popup
+          .getMenu()
+          .add("文件夹排序方式")
+          .setOnMenuItemClickListener(
+              item -> {
+                sortFolders();
+                return true;
+              });
+    } else {
+      popup
+          .getMenu()
+          .add("更改页面顺序")
+          .setOnMenuItemClickListener(
+              item -> {
+                reorder();
+                return true;
+              });
+      popup
+          .getMenu()
+          .add("选择页面")
+          .setOnMenuItemClickListener(
+              item -> {
+                selecting = true;
+                refresh();
+                return true;
+              });
+      popup
+          .getMenu()
+          .add("改名")
+          .setOnMenuItemClickListener(
+              item -> {
+                renameCurrent();
+                return true;
+              });
     }
-    if (documentId != null) {
-      DocumentStore.Document doc = store.document(documentId);
-      new AlertDialog.Builder(this)
-          .setTitle(doc.title)
-          .setItems(
-              new String[] {"选择页面", "重命名", "移动到文件夹", "重试未完成页面", "放入回收站", "扫描设置"},
-              (d, w) -> {
-                switch (w) {
-                  case 0:
-                    selecting = true;
-                    refresh();
-                    break;
-                  case 1:
-                    Ui.rename(
-                        this,
-                        "重命名",
-                        doc.title,
-                        n -> {
-                          store.renameDocument(doc.id, n);
-                          refresh();
-                        });
-                    break;
-                  case 2:
-                    move(doc);
-                    break;
-                  case 3:
-                    store.retryErrors(doc.id);
-                    MyFlatApp.of(this).startProcessing();
-                    refresh();
-                    break;
-                  case 4:
-                    store.trash(doc.id, true);
-                    documentId = null;
-                    refresh();
-                    break;
-                  case 5:
-                    settings();
-                    break;
-                }
-              })
-          .show();
-    } else
-      new AlertDialog.Builder(this)
-          .setItems(
-              new String[] {"新建文件夹", "扫描设置", "回收站", "关于 MyFlat"},
-              (d, w) -> {
-                if (w == 0)
-                  Ui.rename(
-                      this,
-                      "新建文件夹",
-                      "",
-                      n -> {
-                        folderId = store.createFolder(n);
-                        refresh();
-                      });
-                else if (w == 1) settings();
-                else if (w == 2) {
-                  trash = true;
-                  refresh();
-                } else
-                  new AlertDialog.Builder(this)
-                      .setTitle("MyFlat 0.1.0")
-                      .setMessage(
-                          "免费开源的本地扫描工具\n\n"
-                              + "曲面展平 · 色彩增强 · 去手指\n"
-                              + "手写消除 · 文档整理 · 本地导出\n\n"
-                              + "照片与文档只保存在你的设备。\n"
-                              + "无需注册账号。")
-                      .setPositiveButton("好的", null)
-                      .show();
-              })
-          .show();
+    popup
+        .getMenu()
+        .add("客户支持")
+        .setOnMenuItemClickListener(
+            item -> {
+              Support.show(this);
+              return true;
+            });
+    popup
+        .getMenu()
+        .add("设置")
+        .setOnMenuItemClickListener(
+            item -> {
+              settings();
+              return true;
+            });
+    popup
+        .getMenu()
+        .add("回收站")
+        .setOnMenuItemClickListener(
+            item -> {
+              trash = true;
+              folderId = 0;
+              documentId = null;
+              refresh();
+              return true;
+            });
+    popup.show();
+  }
+
+  private void sortFolders() {
+    String[] names = {"名称（升序）", "名称（降序）", "创建时间（最新）", "创建时间（最早）"};
+    new AlertDialog.Builder(this)
+        .setTitle("文件夹排序方式")
+        .setSingleChoiceItems(
+            names,
+            getPreferences(0).getInt("folder_sort", 3),
+            (d, w) -> {
+              getPreferences(0).edit().putInt("folder_sort", w).apply();
+              d.dismiss();
+              refresh();
+            })
+        .setNegativeButton("取消", null)
+        .show();
   }
 
   private void folderMenu(DocumentStore.Folder f) {
@@ -877,31 +864,26 @@ public final class MainActivity extends Activity {
   }
 
   private void reorder() {
-    if (selected.size() != 1) {
-      Toast.makeText(this, "选择一页后调整页序", Toast.LENGTH_SHORT).show();
-      return;
-    }
-    String id = selected.iterator().next();
-    EditText value = Ui.input(this, "1", "目标页码");
-    value.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
-    new AlertDialog.Builder(this)
-        .setTitle("移动到第几页")
-        .setView(value)
-        .setPositiveButton(
-            "移动",
-            (d, w) -> {
-              try {
-                store.reorder(
-                    store.page(id).document, id, Integer.parseInt(value.getText().toString()) - 1);
-                selected.clear();
-                selecting = false;
-                refresh();
-              } catch (NumberFormatException ex) {
-                Toast.makeText(this, "请输入页码", Toast.LENGTH_SHORT).show();
-              }
-            })
-        .setNegativeButton("取消", null)
-        .show();
+    List<DocumentStore.Page> pages = visiblePages();
+    PageOrderDialog.show(
+        this,
+        "更改页面顺序",
+        pages,
+        (image, page) -> {
+          try {
+            Ui.thumbnail(
+                image, store.file("ready".equals(page.status) ? page.result : page.original));
+          } catch (IOException ignored) {
+          }
+        },
+        order -> {
+          List<String> ids = new ArrayList<>();
+          for (DocumentStore.Page page : order) ids.add(page.id);
+          store.setPageOrder(ids, folderId, documentId);
+          selected.clear();
+          selecting = false;
+          refresh();
+        });
   }
 
   private void deleteSelected() {
@@ -955,31 +937,7 @@ public final class MainActivity extends Activity {
   }
 
   private void settings() {
-    EffectsForm form = new EffectsForm(this, ScanSettings.defaults(this), true);
-    LinearLayout body = Ui.column(this);
-    body.addView(form.view);
-    TextView quality = Ui.text(this, "JPEG 保存质量", 14, Ui.INK);
-    Ui.padding(quality, 24, 2);
-    body.addView(quality);
-    SeekBar slider = new SeekBar(this);
-    slider.setMax(40);
-    slider.setProgress(ScanSettings.defaults(this).quality - 60);
-    Ui.padding(slider, 20, 0);
-    body.addView(slider);
-    ScrollView scroll = new ScrollView(this);
-    scroll.addView(body);
-    new AlertDialog.Builder(this)
-        .setTitle("默认扫描设置")
-        .setView(scroll)
-        .setNegativeButton("取消", null)
-        .setPositiveButton(
-            "保存",
-            (d, w) -> {
-              ScanSettings settings = form.value();
-              settings.quality = slider.getProgress() + 60;
-              settings.save(this);
-            })
-        .show();
+    startActivity(new Intent(this, SettingsActivity.class));
   }
 
   private void export(Exporter.Format format) {
@@ -1010,34 +968,7 @@ public final class MainActivity extends Activity {
     }
     DocumentStore.Document doc = documentId == null ? null : store.document(documentId);
     String exportTitle = doc == null ? folderName() : doc.title;
-    LinearLayout body = Ui.column(this);
-    Ui.padding(body, 24, 8);
-    EditText name = Ui.input(this, exportTitle, "文件名称");
-    body.addView(name);
-    CheckBox a4 = Ui.check(this, "PDF 使用 A4 纸张（留白居中）", false);
-    if (format == Exporter.Format.PDF) body.addView(a4);
-    if (format == Exporter.Format.ZIP && pages.size() == 1) {
-      new AlertDialog.Builder(this)
-          .setTitle("导出图片")
-          .setItems(
-              new String[] {"JPEG 图片", "ZIP 压缩包"},
-              (d, w) ->
-                  startExport(
-                      exportTitle,
-                      pages,
-                      w == 0 ? Exporter.Format.JPEG : Exporter.Format.ZIP,
-                      false))
-          .show();
-      return;
-    }
-    body.addView(Ui.text(this, "共 " + pages.size() + " 页，顺序与文档一致。", 13, Ui.MUTED));
-    new AlertDialog.Builder(this)
-        .setTitle(format == Exporter.Format.PDF ? "创建 PDF" : "创建 ZIP")
-        .setView(body)
-        .setNegativeButton("取消", null)
-        .setPositiveButton(
-            "生成文件", (d, w) -> startExport(name.getText().toString(), pages, format, a4.isChecked()))
-        .show();
+    ExportActivity.open(this, exportTitle, pages, format);
   }
 
   private void startExport(

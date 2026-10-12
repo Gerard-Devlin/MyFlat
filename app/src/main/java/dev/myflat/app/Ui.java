@@ -129,11 +129,73 @@ final class Ui {
     return box;
   }
 
+  static void dialogInsets(Dialog dialog, View root) {
+    root.setOnApplyWindowInsetsListener(
+        (view, insets) -> {
+          if (Build.VERSION.SDK_INT >= 30) {
+            android.graphics.Insets bars =
+                insets.getInsets(
+                    WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+          } else
+            view.setPadding(
+                insets.getSystemWindowInsetLeft(),
+                insets.getSystemWindowInsetTop(),
+                insets.getSystemWindowInsetRight(),
+                insets.getSystemWindowInsetBottom());
+          return insets;
+        });
+    dialog.setContentView(root);
+    root.requestApplyInsets();
+  }
+
+  static void thumbnail(ImageView image, android.net.Uri uri) {
+    String key = uri.toString();
+    image.setTag(key);
+    Bitmap cached = cache.get(key);
+    if (cached != null) {
+      image.setImageBitmap(cached);
+      return;
+    }
+    thumbnails.submit(
+        () -> {
+          try {
+            Bitmap bitmap;
+            if ("application/pdf".equals(image.getContext().getContentResolver().getType(uri))) {
+              try (android.os.ParcelFileDescriptor fd =
+                      image.getContext().getContentResolver().openFileDescriptor(uri, "r");
+                  android.graphics.pdf.PdfRenderer pdf = new android.graphics.pdf.PdfRenderer(fd);
+                  android.graphics.pdf.PdfRenderer.Page page = pdf.openPage(0)) {
+                float scale = 500f / Math.max(page.getWidth(), page.getHeight());
+                bitmap =
+                    Bitmap.createBitmap(
+                        Math.max(1, Math.round(page.getWidth() * scale)),
+                        Math.max(1, Math.round(page.getHeight() * scale)),
+                        Bitmap.Config.ARGB_8888);
+                bitmap.eraseColor(Color.WHITE);
+                page.render(
+                    bitmap,
+                    null,
+                    null,
+                    android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+              }
+            } else bitmap = Images.decode(image.getContext(), uri, 500);
+            cache.put(key, bitmap);
+            image.post(
+                () -> {
+                  if (key.equals(image.getTag())) image.setImageBitmap(bitmap);
+                });
+          } catch (Exception ignored) {
+          }
+        });
+  }
+
   static View iconButton(Context c, String icon, String description, Runnable click) {
     FrameLayout frame = new FrameLayout(c);
     Icon view = new Icon(c, icon);
-    frame.addView(view, new FrameLayout.LayoutParams(dp(c, 25), dp(c, 25), Gravity.CENTER));
-    frame.setLayoutParams(new LinearLayout.LayoutParams(dp(c, 48), dp(c, 48)));
+    frame.addView(view, new FrameLayout.LayoutParams(dp(c, 24), dp(c, 24), Gravity.CENTER));
+    int hitSize = icon.equals("back") ? 56 : 48;
+    frame.setLayoutParams(new LinearLayout.LayoutParams(dp(c, hitSize), dp(c, hitSize)));
     frame.setContentDescription(description);
     frame.setBackgroundResource(android.R.drawable.list_selector_background);
     frame.setOnClickListener(v -> click.run());
@@ -233,6 +295,15 @@ final class Ui {
       super(c);
       int id;
       switch (name) {
+        case "edit":
+          id = R.drawable.myflat_ic_edit;
+          break;
+        case "rename":
+          id = R.drawable.myflat_ic_rename;
+          break;
+        case "sort":
+          id = R.drawable.myflat_ic_sort;
+          break;
         case "back":
           id = R.drawable.myflat_ic_back;
           break;

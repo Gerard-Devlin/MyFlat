@@ -19,6 +19,7 @@ public final class EditorActivity extends Activity {
   private Bitmap processed, original;
   private boolean comparing = false, dirty = false, registered = false;
   private float ratio = 0, cropRotation = 0;
+  private int quarterRotation = 0;
   private Bitmap cropBase;
   private String pageId;
   private long folderContext;
@@ -80,8 +81,8 @@ public final class EditorActivity extends Activity {
                 Bitmap result =
                     Images.decode(
                         store.file("ready".equals(page.status) ? page.result : page.original),
-                        3600);
-                Bitmap source = Images.decode(store.file(page.original), 3600);
+                        1600);
+                Bitmap source = Images.decode(store.file(page.original), 1600);
                 runOnUiThread(
                     () -> {
                       if (isFinishing() || isDestroyed()) {
@@ -89,11 +90,16 @@ public final class EditorActivity extends Activity {
                         source.recycle();
                         return;
                       }
+                      Bitmap previousResult = processed, previousOriginal = original;
                       processed = result;
                       original = source;
                       comparing = false;
                       dirty = false;
                       build(PageCanvas.Mode.VIEW);
+                      if (previousResult != null && previousResult != result)
+                        previousResult.recycle();
+                      if (previousOriginal != null && previousOriginal != source)
+                        previousOriginal.recycle();
                     });
               } catch (Exception ex) {
                 runOnUiThread(() -> Ui.error(this, ex));
@@ -104,7 +110,7 @@ public final class EditorActivity extends Activity {
   private void build(PageCanvas.Mode mode) {
     LinearLayout root = Ui.root(this);
     LinearLayout header = Ui.row(this);
-    Ui.padding(header, 4, 0);
+    Ui.padding(header, 0, 0);
     header.addView(Ui.iconButton(this, "back", "返回", this::back));
     List<DocumentStore.Page> pages = new ArrayList<>();
     if (folderContext > 0) {
@@ -151,11 +157,13 @@ public final class EditorActivity extends Activity {
     canvas = new PageCanvas(this);
     canvas.image(processed);
     canvas.mode(mode);
+    if (mode == PageCanvas.Mode.VIEW) loadDetail(false);
     canvas.onSwipe = direction -> navigate(pages, at + direction);
     root.addView(canvas, new LinearLayout.LayoutParams(-1, 0, 1));
     if (mode == PageCanvas.Mode.CROP) {
       cropBase = processed;
       cropRotation = 0;
+      quarterRotation = 0;
       LinearLayout controls = Ui.column(this);
       controls.setGravity(Gravity.CENTER_HORIZONTAL);
       controls.setBackgroundColor(Color.WHITE);
@@ -166,23 +174,62 @@ public final class EditorActivity extends Activity {
       outline.setStroke(Ui.dp(this, 1), 0xffaaaaaa);
       paper.setBackground(outline);
       controls.addView(paper, new LinearLayout.LayoutParams(Ui.dp(this, 140), Ui.dp(this, 32)));
-      paper.setOnClickListener(
-          v -> {
-            String[] names = {"自定义", "A4", "A5", "B5", "1:1", "4:3"};
-            float[] values = {
-              0, 1f / (float) Math.sqrt(2), 1f / (float) Math.sqrt(2), .704f, 1, 4f / 3
-            };
-            new AlertDialog.Builder(this)
-                .setTitle("纸张比例")
-                .setItems(
-                    names,
-                    (d, w) -> {
-                      ratio = values[w];
-                      canvas.ratio(ratio);
-                      paper.setText("比例：" + names[w] + "  ⌄");
-                    })
-                .show();
-          });
+      LinearLayout ratios = Ui.row(this);
+      HorizontalScrollView ratioScroll = new HorizontalScrollView(this);
+      ratioScroll.setHorizontalScrollBarEnabled(false);
+      ratioScroll.addView(ratios);
+      ratioScroll.setVisibility(View.GONE);
+      String[] names = {"自定义", "长方形", "原版的", "标准", "A4", "Letter"};
+      String[] labels = {
+        "", "", processed.getWidth() + ":" + processed.getHeight(), "152:225", "210:297", "8.5:11"
+      };
+      float[] values = {
+        0,
+        -1,
+        (float) processed.getWidth() / processed.getHeight(),
+        152f / 225,
+        210f / 297,
+        8.5f / 11
+      };
+      String[] icons = {
+        "myflat_crop_ic_custom",
+        "myflat_crop_ic_rectangle",
+        "myflat_crop_ic_original",
+        "myflat_crop_ic_standard",
+        "myflat_crop_ic_a4",
+        "myflat_crop_ic_letter"
+      };
+      for (int n = 0; n < names.length; n++) {
+        int selected = n;
+        LinearLayout item = Ui.column(this);
+        item.setGravity(Gravity.CENTER);
+        Ui.padding(item, 12, 4);
+        ImageView icon = new ImageView(this);
+        int resource = getResources().getIdentifier(icons[n], "drawable", getPackageName());
+        if (resource != 0) icon.setImageResource(resource);
+        else icon.setImageResource(R.drawable.myflat_ic_crop);
+        icon.setImageTintList(android.content.res.ColorStateList.valueOf(Ui.INK));
+        item.addView(icon, new LinearLayout.LayoutParams(Ui.dp(this, 28), Ui.dp(this, 32)));
+        TextView label = Ui.bold(this, names[n], 12);
+        label.setGravity(Gravity.CENTER);
+        Ui.padding(label, 0, 4);
+        item.addView(label);
+        TextView aspect = Ui.text(this, labels[n], 10, Ui.INK);
+        aspect.setGravity(Gravity.CENTER);
+        item.addView(aspect);
+        item.setContentDescription(names[n] + "比例");
+        item.setOnClickListener(
+            v -> {
+              ratio = values[selected];
+              canvas.ratio(ratio);
+              paper.setText("比例：" + names[selected] + "  ⌄");
+              for (int j = 0; j < ratios.getChildCount(); j++)
+                ratios
+                    .getChildAt(j)
+                    .setBackgroundColor(j == selected ? 0xffd5f3ee : Color.TRANSPARENT);
+            });
+        ratios.addView(item, new LinearLayout.LayoutParams(Ui.dp(this, 84), Ui.dp(this, 88)));
+      }
       controls.addView(Ui.spacer(this, 30));
       LinearLayout ruler = Ui.row(this);
       Ui.padding(ruler, 8, 0);
@@ -196,6 +243,13 @@ public final class EditorActivity extends Activity {
           };
       ruler.addView(Ui.iconButton(this, "rotate_right", "向右旋转90度", () -> cropRotate(90)));
       controls.addView(ruler);
+      controls.addView(ratioScroll, new LinearLayout.LayoutParams(-1, Ui.dp(this, 88)));
+      paper.setOnClickListener(
+          v -> {
+            boolean open = ratioScroll.getVisibility() != View.VISIBLE;
+            ratioScroll.setVisibility(open ? View.VISIBLE : View.GONE);
+            ruler.setVisibility(open ? View.GONE : View.VISIBLE);
+          });
       root.addView(controls, new LinearLayout.LayoutParams(-1, Ui.dp(this, 210)));
     } else if (mode == PageCanvas.Mode.ERASE) {
       SeekBar size = new SeekBar(this);
@@ -222,18 +276,7 @@ public final class EditorActivity extends Activity {
       root.addView(Ui.line(this));
       LinearLayout bar = Ui.row(this);
       Ui.padding(bar, 8, 0);
-      action(
-          bar,
-          "crop",
-          "裁剪",
-          () -> {
-            ratio = 0;
-            build(PageCanvas.Mode.CROP);
-          });
-      action(bar, "share", "分享", this::share);
-      action(bar, "pdf", "创建 PDF", this::exportPdf);
-      action(bar, "trash", "删除", this::deletePage);
-      action(bar, "more", "更多", this::more);
+      ActionMenus.toolbar(this, bar, "editor", menuItems(), () -> build(PageCanvas.Mode.VIEW));
       root.addView(bar);
     }
   }
@@ -246,13 +289,26 @@ public final class EditorActivity extends Activity {
     return text;
   }
 
+  private void loadDetail(boolean source) {
+    try {
+      canvas.fullResolution(
+          store.file(source || !"ready".equals(page.status) ? page.original : page.result));
+    } catch (IOException ex) {
+      Ui.error(this, ex);
+    }
+  }
+
   private void compare() {
     comparing = !comparing;
     canvas.image(comparing ? original : processed);
+    loadDetail(comparing);
   }
 
   private void cropRotate(int degrees) {
+    quarterRotation = (quarterRotation + degrees + 360) % 360;
+    Bitmap before = cropBase;
     cropBase = ImageMath.rotate(cropBase, degrees);
+    if (before != processed && before != cropBase) before.recycle();
     applyCropRotation();
   }
 
@@ -350,12 +406,58 @@ public final class EditorActivity extends Activity {
   }
 
   private void rotate() {
-    persist(ImageMath.rotate(processed, 90));
+    ProgressDialog progress = ProgressDialog.show(this, "", "正在旋转", true, false);
+    MyFlatApp.of(this)
+        .io
+        .submit(
+            () -> {
+              try {
+                Bitmap full = Images.decode(store.file(page.result), 0);
+                Bitmap rotated = ImageMath.rotate(full, 90);
+                if (rotated != full) full.recycle();
+                store.complete(page, rotated, 100);
+                rotated.recycle();
+                runOnUiThread(
+                    () -> {
+                      progress.dismiss();
+                      load();
+                    });
+              } catch (Exception ex) {
+                runOnUiThread(
+                    () -> {
+                      progress.dismiss();
+                      Ui.error(this, ex);
+                    });
+              }
+            });
   }
 
   private void saveEdit() {
     if (canvas.mode() == PageCanvas.Mode.ERASE) {
-      persist(canvas.image());
+      PageCanvas editing = canvas;
+      ProgressDialog progress = ProgressDialog.show(this, "", "正在保存", true, false);
+      MyFlatApp.of(this)
+          .io
+          .submit(
+              () -> {
+                try {
+                  Bitmap full = Images.decode(store.file(page.result), 0);
+                  editing.applyBrushes(full);
+                  store.complete(page, full, 100);
+                  full.recycle();
+                  runOnUiThread(
+                      () -> {
+                        progress.dismiss();
+                        load();
+                      });
+                } catch (Exception ex) {
+                  runOnUiThread(
+                      () -> {
+                        progress.dismiss();
+                        Ui.error(this, ex);
+                      });
+                }
+              });
       return;
     }
     float[] corners = canvas.corners();
@@ -366,12 +468,30 @@ public final class EditorActivity extends Activity {
     ProgressDialog progress = ProgressDialog.show(this, "", "正在裁剪", true, false);
     Bitmap source = canvas.image();
     float chosenRatio = ratio;
+    float angle = cropRotation + quarterRotation;
+    int previewWidth = source.getWidth(), previewHeight = source.getHeight();
     MyFlatApp.of(this)
         .io
         .submit(
             () -> {
               try {
-                Bitmap result = ImageMath.crop(source, corners);
+                Bitmap full = Images.decode(store.file(page.result), 0);
+                if (angle != 0) {
+                  Matrix turn = new Matrix();
+                  turn.postRotate(angle);
+                  Bitmap oriented =
+                      Bitmap.createBitmap(
+                          full, 0, 0, full.getWidth(), full.getHeight(), turn, true);
+                  if (oriented != full) full.recycle();
+                  full = oriented;
+                }
+                float[] fullCorners = corners.clone();
+                for (int i = 0; i < 8; i += 2) {
+                  fullCorners[i] *= (float) full.getWidth() / previewWidth;
+                  fullCorners[i + 1] *= (float) full.getHeight() / previewHeight;
+                }
+                Bitmap result = ImageMath.crop(full, fullCorners);
+                full.recycle();
                 if (chosenRatio > 0) {
                   Bitmap scaled =
                       Bitmap.createScaledBitmap(
@@ -387,33 +507,8 @@ public final class EditorActivity extends Activity {
                 runOnUiThread(
                     () -> {
                       progress.dismiss();
-                      processed = output;
-                      build(PageCanvas.Mode.VIEW);
-                    });
-              } catch (Exception ex) {
-                runOnUiThread(
-                    () -> {
-                      progress.dismiss();
-                      Ui.error(this, ex);
-                    });
-              }
-            });
-  }
-
-  private void persist(Bitmap result) {
-    ProgressDialog progress = ProgressDialog.show(this, "", "正在保存", true, false);
-    MyFlatApp.of(this)
-        .io
-        .submit(
-            () -> {
-              try {
-                store.complete(page, result, ScanSettings.parse(page.settings).quality);
-                runOnUiThread(
-                    () -> {
-                      progress.dismiss();
-                      processed = result;
-                      comparing = false;
-                      build(PageCanvas.Mode.VIEW);
+                      output.recycle();
+                      load();
                     });
               } catch (Exception ex) {
                 runOnUiThread(
@@ -483,60 +578,30 @@ public final class EditorActivity extends Activity {
   }
 
   private void exportPdf() {
-    ProgressDialog progress = ProgressDialog.show(this, "", "正在创建 PDF", true, false);
-    MyFlatApp.of(this)
-        .io
-        .submit(
+    ExportActivity.open(
+        this, "扫描页面", Collections.singletonList(store.page(page.id)), Exporter.Format.PDF);
+  }
+
+  private List<ActionMenus.Item> menuItems() {
+    return Arrays.asList(
+        new ActionMenus.Item(
+            "crop",
+            "裁剪",
             () -> {
-              try {
-                File file =
-                    Exporter.create(
-                        this,
-                        "扫描页面",
-                        Collections.singletonList(store.page(page.id)),
-                        Exporter.Format.PDF,
-                        false,
-                        (d, t) -> {});
-                runOnUiThread(
-                    () -> {
-                      progress.dismiss();
-                      Uri uri = ShareProvider.uri(this, file);
-                      Intent intent =
-                          new Intent(Intent.ACTION_SEND)
-                              .setType("application/pdf")
-                              .putExtra(Intent.EXTRA_STREAM, uri)
-                              .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                      intent.setClipData(ClipData.newRawUri("MyFlat", uri));
-                      startActivity(Intent.createChooser(intent, "分享 PDF"));
-                    });
-              } catch (Exception ex) {
-                runOnUiThread(
-                    () -> {
-                      progress.dismiss();
-                      Ui.error(this, ex);
-                    });
-              }
-            });
+              ratio = 0;
+              build(PageCanvas.Mode.CROP);
+            }),
+        new ActionMenus.Item("share", "分享", this::share),
+        new ActionMenus.Item("pdf", "创建 PDF", this::exportPdf),
+        new ActionMenus.Item("trash", "删除", this::deletePage),
+        new ActionMenus.Item("rotate", "旋转", this::rotate),
+        new ActionMenus.Item("effects", "增强颜色", this::effects),
+        new ActionMenus.Item("erase", "擦除", () -> build(PageCanvas.Mode.ERASE)),
+        new ActionMenus.Item("compare", "原图", this::compare));
   }
 
   private void more() {
-    new AlertDialog.Builder(this)
-        .setItems(
-            new String[] {"旋转90度", "处理效果", "擦除标记", "原图对比", "重置为原图"},
-            (d, w) -> {
-              if (w == 0) rotate();
-              else if (w == 1) effects();
-              else if (w == 2) build(PageCanvas.Mode.ERASE);
-              else if (w == 3) compare();
-              else
-                new AlertDialog.Builder(this)
-                    .setMessage("用原图替换当前扫描结果？原图会继续保留。")
-                    .setPositiveButton(
-                        "重置", (a, b) -> persist(original.copy(Bitmap.Config.ARGB_8888, true)))
-                    .setNegativeButton("取消", null)
-                    .show();
-            })
-        .show();
+    ActionMenus.show(this, "editor", menuItems(), () -> build(PageCanvas.Mode.VIEW));
   }
 
   private void deletePage() {

@@ -19,7 +19,7 @@ final class CameraMenus {
       boolean sound,
       Consumer<Boolean> soundChanged,
       Runnable settings,
-      Runnable guide,
+      Runnable support,
       Runnable importer,
       Runnable optionsChanged) {
     LinearLayout card = Ui.column(activity);
@@ -91,11 +91,11 @@ final class CameraMenus {
     footer.addView(
         footerAction(
             activity,
-            R.drawable.myflat_ic_compare,
-            "扫描指南",
+            R.drawable.myflat_ic_support,
+            "客户支持",
             () -> {
               dialog.dismiss();
-              guide.run();
+              support.run();
             }),
         new LinearLayout.LayoutParams(0, Ui.dp(activity, 64), 1));
     View separator = divider(activity, 0xff343635);

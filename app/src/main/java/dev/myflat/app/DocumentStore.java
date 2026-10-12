@@ -236,13 +236,96 @@ public final class DocumentStore extends SQLiteOpenHelper {
     return p;
   }
 
+  public synchronized void setPageOrder(List<String> ids, long folder, String document) {
+    if (ids.isEmpty()) return;
+    SQLiteDatabase db = getWritableDatabase();
+    db.beginTransaction();
+    try {
+      String target = document != null ? document : page(ids.get(0)).document;
+      Set<String> sources = new HashSet<>();
+      int index = 0;
+      for (String id : ids) {
+        Page p = page(id);
+        if (p == null) continue;
+        if (document != null && !document.equals(p.document))
+          throw new IllegalArgumentException("页面不属于文档");
+        if (document == null && document(p.document).folder != folder)
+          throw new IllegalArgumentException("页面不属于文件夹");
+        sources.add(p.document);
+        ContentValues values = new ContentValues();
+        values.put("document", target);
+        values.put("position", index++);
+        db.update("pages", values, "id=?", new String[] {id});
+      }
+      for (String id : sources)
+        if (!id.equals(target) && pages(id).isEmpty())
+          db.delete("documents", "id=?", new String[] {id});
+      touch(target);
+      db.setTransactionSuccessful();
+    } finally {
+      db.endTransaction();
+    }
+  }
+
+  public synchronized void movePages(java.util.Collection<String> ids, long folder) {
+    if (ids.isEmpty()) return;
+    SQLiteDatabase db = getWritableDatabase();
+    db.beginTransaction();
+    try {
+      String target =
+          createDocument(
+              folder,
+              "扫描 "
+                  + new java.text.SimpleDateFormat("yyyy-MM-dd HH.mm", Locale.getDefault())
+                      .format(new Date()));
+      int position = 0;
+      Set<String> sources = new HashSet<>();
+      for (String id : ids) {
+        Page page = page(id);
+        if (page == null) continue;
+        sources.add(page.document);
+        ContentValues values = new ContentValues();
+        values.put("document", target);
+        values.put("position", position++);
+        db.update("pages", values, "id=?", new String[] {id});
+      }
+      for (String source : sources) {
+        if (pages(source).isEmpty()) db.delete("documents", "id=?", new String[] {source});
+        else touch(source);
+      }
+      touch(target);
+      db.setTransactionSuccessful();
+    } finally {
+      db.endTransaction();
+    }
+  }
+
   public synchronized String addPage(String doc, Bitmap bitmap, ScanSettings settings)
+      throws IOException {
+    File temporary = File.createTempFile("page-", ".jpg", root);
+    try {
+      saveJpeg(temporary, bitmap, 100);
+      try (InputStream in = new FileInputStream(temporary)) {
+        return addSource(doc, in, settings);
+      }
+    } finally {
+      temporary.delete();
+    }
+  }
+
+  /** Keeps capture/import bytes intact; page transforms live in the queued settings. */
+  public synchronized String addSource(String doc, InputStream source, ScanSettings settings)
       throws IOException {
     if (document(doc) == null) throw new IOException("目标文档已被删除");
     String id = UUID.randomUUID().toString(),
         original = id + "-original.jpg",
         result = id + "-result.jpg";
-    saveJpeg(file(original), bitmap, 98);
+    try (OutputStream out = new FileOutputStream(file(original))) {
+      Exporter.copy(source, out);
+    } catch (IOException | RuntimeException ex) {
+      file(original).delete();
+      throw ex;
+    }
     SQLiteDatabase db = getWritableDatabase();
     db.beginTransaction();
     try {

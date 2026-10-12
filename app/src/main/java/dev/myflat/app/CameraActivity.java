@@ -63,6 +63,9 @@ public final class CameraActivity extends Activity {
   private final MediaActionSound sound = new MediaActionSound();
   private long stableSince = 0, lastShot = 0;
   private float changeSinceShot = 0;
+  private int deviceOrientation;
+  private OrientationEventListener orientation;
+  private final List<View> rotatingControls = new ArrayList<>();
 
   @Override
   public void onCreate(Bundle state) {
@@ -78,6 +81,18 @@ public final class CameraActivity extends Activity {
     guideStep = state == null ? 0 : state.getInt("guide_step");
     shutterSound = getPreferences(MODE_PRIVATE).getBoolean("shutter_sound", false);
     build();
+    orientation =
+        new OrientationEventListener(this) {
+          public void onOrientationChanged(int value) {
+            if (value == ORIENTATION_UNKNOWN) return;
+            int next = ((value + 45) / 90 * 90) % 360;
+            if (next != deviceOrientation) {
+              deviceOrientation = next;
+              for (View control : rotatingControls)
+                control.animate().rotation(-next).setDuration(180).start();
+            }
+          }
+        };
   }
 
   @Override
@@ -155,7 +170,11 @@ public final class CameraActivity extends Activity {
             controls,
             "无定时",
             () -> {
-              timer = timer == 0 ? 3 : timer == 3 ? 5 : 0;
+              int custom = getSharedPreferences("preferences", 0).getInt("timer", 7);
+              timer =
+                  timer == 0
+                      ? 3
+                      : timer == 3 ? 5 : timer == 5 && custom != 3 && custom != 5 ? custom : 0;
               updateControls();
             });
     autoButton =
@@ -217,6 +236,8 @@ public final class CameraActivity extends Activity {
     library.setContentDescription("库");
     library.setOnClickListener(v -> library());
     panel.addView(library);
+    rotatingControls.add(library);
+    rotatingControls.add(recent);
 
     LinearLayout folderBox = Ui.row(this);
     folderBox.setGravity(Gravity.CENTER);
@@ -252,6 +273,7 @@ public final class CameraActivity extends Activity {
     image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
     hit.setBackgroundResource(android.R.drawable.list_selector_background);
     hit.setOnClickListener(v -> click.run());
+    rotatingControls.add(image);
     return image;
   }
 
@@ -284,6 +306,21 @@ public final class CameraActivity extends Activity {
                 : R.drawable.myflat_ic_camera_timer_off,
         timer > 0,
         timer == 0 ? "无定时" : timer + "秒定时");
+    if (timer > 0 && timer != 3 && timer != 5) {
+      Bitmap symbol = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888);
+      Canvas image = new Canvas(symbol);
+      android.graphics.drawable.Drawable face =
+          getDrawable(R.drawable.myflat_ic_camera_timer_custom);
+      face.setBounds(0, 0, 96, 96);
+      face.draw(image);
+      Paint number = new Paint(Paint.ANTI_ALIAS_FLAG);
+      number.setColor(Color.BLACK);
+      number.setTextAlign(Paint.Align.CENTER);
+      number.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+      number.setTextSize(timer < 10 ? 38 : 30);
+      image.drawText(Integer.toString(timer), 48, 67, number);
+      timerButton.setImageBitmap(symbol);
+    }
     controlState(autoButton, R.drawable.myflat_ic_camera_auto, auto, auto ? "自动拍摄开" : "自动拍摄关");
     idleHint();
   }
@@ -357,7 +394,7 @@ public final class CameraActivity extends Activity {
               getPreferences(MODE_PRIVATE).edit().putBoolean("shutter_sound", selected).apply();
             },
             this::settings,
-            () -> showGuide(0),
+            () -> Support.show(this),
             this::importImages,
             () -> {
               options.save(this);
@@ -572,29 +609,16 @@ public final class CameraActivity extends Activity {
   }
 
   private void settings() {
-    EffectsForm form = new EffectsForm(this, options, true);
-    ScrollView scroll = new ScrollView(this);
-    scroll.addView(form.view);
-    showMenu(
-        new AlertDialog.Builder(this)
-            .setTitle("扫描设置")
-            .setView(scroll)
-            .setNegativeButton("取消", null)
-            .setPositiveButton(
-                "应用",
-                (d, w) -> {
-                  options = form.value();
-                  options.save(this);
-                  updateControls();
-                  guide.invalidate();
-                })
-            .create());
+    startActivity(new Intent(this, SettingsActivity.class));
   }
 
   @Override
   protected void onResume() {
     super.onResume();
     resumed = true;
+    options = ScanSettings.defaults(this);
+    updateControls();
+    if (orientation != null) orientation.enable();
     capturing = false;
     shutter.setAlpha(1f);
     updateRecent();
@@ -616,6 +640,7 @@ public final class CameraActivity extends Activity {
   @Override
   protected void onPause() {
     resumed = false;
+    if (orientation != null) orientation.disable();
     main.removeCallbacksAndMessages(null);
     close();
     if (cameraThread != null) {
@@ -706,7 +731,27 @@ public final class CameraActivity extends Activity {
       flashAvailable = Boolean.TRUE.equals(c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE));
       StreamConfigurationMap map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
       if (map == null) throw new IOException("相机不支持图像输出");
-      Size jpeg = choose(map.getOutputSizes(android.graphics.ImageFormat.JPEG), 3200, 4f / 3);
+      Size jpeg =
+          largest(
+              map.getOutputSizes(android.graphics.ImageFormat.JPEG),
+              map.getHighResolutionOutputSizes(android.graphics.ImageFormat.JPEG));
+      standardPhotoSize = jpeg;
+      maximumPixelMode = false;
+      if (Build.VERSION.SDK_INT >= 31) {
+        StreamConfigurationMap full =
+            c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION);
+        if (full != null) {
+          Size ultra =
+              largest(
+                  full.getOutputSizes(android.graphics.ImageFormat.JPEG),
+                  full.getHighResolutionOutputSizes(android.graphics.ImageFormat.JPEG));
+          if ((long) ultra.getWidth() * ultra.getHeight()
+              > (long) jpeg.getWidth() * jpeg.getHeight()) {
+            jpeg = ultra;
+            maximumPixelMode = true;
+          }
+        }
+      }
       previewSize = choose(map.getOutputSizes(SurfaceTexture.class), 1440, 4f / 3);
       reader =
           ImageReader.newInstance(
@@ -767,6 +812,21 @@ public final class CameraActivity extends Activity {
     return best;
   }
 
+  private boolean maximumPixelMode;
+  private Size standardPhotoSize;
+
+  static Size largest(Size[]... groups) {
+    Size best = null;
+    for (Size[] sizes : groups)
+      if (sizes != null)
+        for (Size size : sizes)
+          if (best == null
+              || (long) size.getWidth() * size.getHeight()
+                  > (long) best.getWidth() * best.getHeight()) best = size;
+    if (best == null) throw new IllegalArgumentException("相机没有 JPEG 输出尺寸");
+    return best;
+  }
+
   private void startPreview() {
     try {
       SurfaceTexture texture = preview.getSurfaceTexture();
@@ -778,8 +838,16 @@ public final class CameraActivity extends Activity {
       repeating.addTarget(surface);
       repeating.set(
           CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
-      camera.createCaptureSession(
-          Arrays.asList(surface, reader.getSurface()),
+      android.hardware.camera2.params.OutputConfiguration previewOutput =
+          new android.hardware.camera2.params.OutputConfiguration(surface);
+      android.hardware.camera2.params.OutputConfiguration photoOutput =
+          new android.hardware.camera2.params.OutputConfiguration(reader.getSurface());
+      if (Build.VERSION.SDK_INT >= 31 && maximumPixelMode) {
+        previewOutput.addSensorPixelModeUsed(CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT);
+        photoOutput.addSensorPixelModeUsed(CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION);
+      }
+      camera.createCaptureSessionByOutputConfigurations(
+          Arrays.asList(previewOutput, photoOutput),
           new CameraCaptureSession.StateCallback() {
             @Override
             public void onConfigured(CameraCaptureSession s) {
@@ -788,6 +856,11 @@ public final class CameraActivity extends Activity {
                 return;
               }
               session = s;
+              getSharedPreferences("preferences", 0)
+                  .edit()
+                  .putInt("active_jpeg_width", reader.getWidth())
+                  .putInt("active_jpeg_height", reader.getHeight())
+                  .apply();
               updatePreview();
               runOnUiThread(
                   () -> {
@@ -798,13 +871,37 @@ public final class CameraActivity extends Activity {
 
             @Override
             public void onConfigureFailed(CameraCaptureSession s) {
-              showError(new IOException("相机预览配置失败"));
+              s.close();
+              if (!retryStandardPreview()) showError(new IOException("相机预览配置失败"));
             }
           },
           cameraHandler);
     } catch (Exception ex) {
-      showError(ex);
+      if (!retryStandardPreview()) showError(ex);
     }
+  }
+
+  private boolean retryStandardPreview() {
+    if (!maximumPixelMode || standardPhotoSize == null || camera == null || !resumed) return false;
+    maximumPixelMode = false;
+    if (session != null) {
+      session.close();
+      session = null;
+    }
+    if (reader != null) reader.close();
+    if (previewSurface != null) {
+      previewSurface.release();
+      previewSurface = null;
+    }
+    reader =
+        ImageReader.newInstance(
+            standardPhotoSize.getWidth(),
+            standardPhotoSize.getHeight(),
+            android.graphics.ImageFormat.JPEG,
+            2);
+    reader.setOnImageAvailableListener(this::imageAvailable, cameraHandler);
+    startPreview();
+    return true;
   }
 
   private void transform() {
@@ -879,9 +976,19 @@ public final class CameraActivity extends Activity {
       request.set(
           CaptureRequest.FLASH_MODE,
           flash ? CaptureRequest.FLASH_MODE_TORCH : CaptureRequest.FLASH_MODE_OFF);
-      request.set(CaptureRequest.JPEG_QUALITY, (byte) 98);
-      int rotation = getWindowManager().getDefaultDisplay().getRotation();
-      request.set(CaptureRequest.JPEG_ORIENTATION, (sensorOrientation - rotation * 90 + 360) % 360);
+      request.set(CaptureRequest.JPEG_QUALITY, (byte) 100);
+      if (Build.VERSION.SDK_INT >= 31 && maximumPixelMode)
+        request.set(
+            CaptureRequest.SENSOR_PIXEL_MODE, CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION);
+      int scanDirection = getSharedPreferences("preferences", 0).getInt("direction", 0);
+      int photoOrientation = scanDirection == 1 ? 0 : scanDirection == 2 ? 90 : deviceOrientation;
+      request.set(
+          CaptureRequest.JPEG_ORIENTATION, (sensorOrientation + photoOrientation + 360) % 360);
+      if (getSharedPreferences("preferences", 0).getBoolean("haptic", false))
+        shutter.performHapticFeedback(
+            Build.VERSION.SDK_INT >= 30
+                ? HapticFeedbackConstants.CONFIRM
+                : HapticFeedbackConstants.KEYBOARD_TAP);
       if (shutterSound) sound.play(MediaActionSound.SHUTTER_CLICK);
       session.capture(
           request.build(),
@@ -922,7 +1029,6 @@ public final class CameraActivity extends Activity {
                 try (OutputStream out = new FileOutputStream(temporary)) {
                   out.write(bytes);
                 }
-                bitmap = Images.decode(this, Uri.fromFile(temporary), 4096);
                 if (documentId == null)
                   documentId =
                       MyFlatApp.of(this)
@@ -932,7 +1038,12 @@ public final class CameraActivity extends Activity {
                               new SimpleDateFormat("扫描 yyyy-MM-dd HH.mm", Locale.getDefault())
                                   .format(new Date()));
                 int count =
-                    Importer.add(this, MyFlatApp.of(this).store, documentId, bitmap, settings);
+                    Importer.addUri(
+                        this,
+                        MyFlatApp.of(this).store,
+                        documentId,
+                        Uri.fromFile(temporary),
+                        settings);
                 captured += count;
                 runOnUiThread(
                     () -> {
@@ -1011,13 +1122,14 @@ public final class CameraActivity extends Activity {
               && !analysisBusy
               && !detectorFailed
               && !overlayOpen()
+              && hasWindowFocus()
               && preview.isAvailable()
               && session != null
               && analysis != null) {
-            Bitmap frame = preview.getBitmap(144, 192);
+            Bitmap frame = preview.getBitmap(288, 384);
             if (frame != null) {
-              int[] pixels = new int[144 * 192];
-              frame.getPixels(pixels, 0, 144, 0, 0, 144, 192);
+              int[] pixels = new int[288 * 384];
+              frame.getPixels(pixels, 0, 288, 0, 0, 288, 384);
               double delta = 255;
               if (lastPixels != null) {
                 delta = 0;
@@ -1037,6 +1149,7 @@ public final class CameraActivity extends Activity {
               double movement = delta;
               boolean dual = options.doublePage;
               float split = options.split;
+              int previewOrientation = deviceOrientation;
               owner.executor.execute(
                   () -> {
                     LivePageDetector.Result result = LivePageDetector.Result.searching();
@@ -1045,7 +1158,7 @@ public final class CameraActivity extends Activity {
                       if (!owner.closed) {
                         if (owner.detector == null)
                           owner.detector = new LivePageDetector(CameraActivity.this);
-                        result = owner.detector.detect(frame, dual, split);
+                        result = owner.detector.detect(frame, dual, split, previewOrientation);
                       }
                     } catch (Exception | LinkageError error) {
                       failure = error;
@@ -1075,6 +1188,7 @@ public final class CameraActivity extends Activity {
                           if (auto
                               && !capturing
                               && !overlayOpen()
+                              && hasWindowFocus()
                               && armed
                               && answer.state == PageGeometry.State.NORMAL
                               && movement < 2.2) {
@@ -1088,7 +1202,7 @@ public final class CameraActivity extends Activity {
                         });
                   });
             }
-          } else if (overlayOpen()) stableSince = 0;
+          } else if (overlayOpen() || !hasWindowFocus()) stableSince = 0;
           main.postDelayed(this, 400);
         }
       };
@@ -1138,13 +1252,27 @@ public final class CameraActivity extends Activity {
         path.close();
         canvas.drawPath(path, paint);
       }
-      if (options.doublePage)
-        canvas.drawLine(
-            getWidth() * options.split,
-            getHeight() * .06f,
-            getWidth() * options.split,
-            getHeight() * .94f,
-            paint);
+      if (options.doublePage && !outlines.isEmpty()) {
+        paint.setPathEffect(
+            new DashPathEffect(
+                new float[] {Ui.dp(CameraActivity.this, 10), Ui.dp(CameraActivity.this, 6)}, 0));
+        paint.setColor(Color.WHITE);
+        if (detection.stacked)
+          canvas.drawLine(
+              getWidth() * .06f,
+              getHeight() * detection.split,
+              getWidth() * .94f,
+              getHeight() * detection.split,
+              paint);
+        else
+          canvas.drawLine(
+              getWidth() * detection.split,
+              getHeight() * .06f,
+              getWidth() * detection.split,
+              getHeight() * .94f,
+              paint);
+        paint.setPathEffect(null);
+      }
     }
   }
 }

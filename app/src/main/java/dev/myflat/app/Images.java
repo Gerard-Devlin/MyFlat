@@ -18,8 +18,9 @@ public final class Images {
           source,
           (decoder, info, src) -> {
             decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+            decoder.setMutableRequired(true);
             int w = info.getSize().getWidth(), h = info.getSize().getHeight();
-            float scale = Math.min(1f, (float) maxEdge / Math.max(w, h));
+            float scale = maxEdge <= 0 ? 1 : Math.min(1f, (float) maxEdge / Math.max(w, h));
             decoder.setTargetSize(
                 Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale)));
           });
@@ -31,10 +32,12 @@ public final class Images {
     }
     if (options.outWidth < 1) throw new IOException("无法读取图片");
     options.inSampleSize = 1;
-    while (Math.max(options.outWidth, options.outHeight) / options.inSampleSize > maxEdge * 1.5f)
+    while (maxEdge > 0
+        && Math.max(options.outWidth, options.outHeight) / options.inSampleSize > maxEdge * 1.5f)
       options.inSampleSize *= 2;
     options.inJustDecodeBounds = false;
     options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+    options.inMutable = true;
     Bitmap result;
     try (InputStream in = context.getContentResolver().openInputStream(uri)) {
       result = BitmapFactory.decodeStream(in, null, options);
@@ -84,17 +87,68 @@ public final class Images {
   }
 
   public static Bitmap decode(File file, int maxEdge) throws IOException {
+    if (Build.VERSION.SDK_INT >= 28) {
+      return ImageDecoder.decodeBitmap(
+          ImageDecoder.createSource(file),
+          (decoder, info, src) -> {
+            decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+            decoder.setMutableRequired(true);
+            int w = info.getSize().getWidth(), h = info.getSize().getHeight();
+            if (maxEdge > 0) {
+              float scale = Math.min(1f, (float) maxEdge / Math.max(w, h));
+              decoder.setTargetSize(
+                  Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale)));
+            }
+          });
+    }
     BitmapFactory.Options options = new BitmapFactory.Options();
     options.inJustDecodeBounds = true;
     BitmapFactory.decodeFile(file.getPath(), options);
     if (options.outWidth < 1) throw new IOException("图片文件不存在或已损坏");
     options.inSampleSize = 1;
-    while (Math.max(options.outWidth, options.outHeight) / options.inSampleSize > maxEdge * 1.5f)
+    while (maxEdge > 0
+        && Math.max(options.outWidth, options.outHeight) / options.inSampleSize > maxEdge * 1.5f)
       options.inSampleSize *= 2;
     options.inJustDecodeBounds = false;
+    options.inMutable = true;
     options.inPreferredConfig = Bitmap.Config.ARGB_8888;
-    Bitmap b = BitmapFactory.decodeFile(file.getPath(), options);
-    if (b == null) throw new IOException("图像解码失败");
-    return b;
+    Bitmap result = BitmapFactory.decodeFile(file.getPath(), options);
+    if (result == null) throw new IOException("图像解码失败");
+    int orientation = new ExifInterface(file).getAttributeInt(ExifInterface.TAG_ORIENTATION, 1);
+    Matrix matrix = new Matrix();
+    switch (orientation) {
+      case 2:
+        matrix.setScale(-1, 1);
+        break;
+      case 3:
+        matrix.setRotate(180);
+        break;
+      case 4:
+        matrix.setScale(1, -1);
+        break;
+      case 5:
+        matrix.setRotate(90);
+        matrix.postScale(-1, 1);
+        break;
+      case 6:
+        matrix.setRotate(90);
+        break;
+      case 7:
+        matrix.setRotate(-90);
+        matrix.postScale(-1, 1);
+        break;
+      case 8:
+        matrix.setRotate(-90);
+        break;
+      default:
+        break;
+    }
+    if (!matrix.isIdentity()) {
+      Bitmap rotated =
+          Bitmap.createBitmap(result, 0, 0, result.getWidth(), result.getHeight(), matrix, true);
+      if (rotated != result) result.recycle();
+      result = rotated;
+    }
+    return result;
   }
 }

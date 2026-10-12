@@ -1,15 +1,19 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <application android:name=".MyFlatApp" android:label="MyFlat" android:theme="@style/AppTheme" android:allowBackup="false" android:supportsRtl="true" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher">
+    <application android:name=".MyFlatApp" android:label="MyFlat" android:theme="@style/AppTheme" android:allowBackup="false" android:largeHeap="true" android:supportsRtl="true" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher">
         <activity android:name=".MainActivity" android:exported="false" android:configChanges="orientation|screenSize" />
         <service android:name=".ScanService" android:exported="false" android:foregroundServiceType="mediaProcessing" />
         <activity android:name=".CameraActivity" android:exported="true" android:screenOrientation="portrait">
             <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
         </activity>
+        <activity android:name=".SettingsActivity" android:exported="false" android:configChanges="orientation|screenSize" />
+        <activity android:name=".ExportActivity" android:exported="false" android:configChanges="orientation|screenSize" />
+        <activity android:name=".ImportActivity" android:exported="false" android:configChanges="orientation|screenSize" />
         <activity android:name=".EditorActivity" android:exported="false" />
         <provider android:name=".ShareProvider" android:authorities="${applicationId}.files" android:exported="false" android:grantUriPermissions="true" />
     </application>

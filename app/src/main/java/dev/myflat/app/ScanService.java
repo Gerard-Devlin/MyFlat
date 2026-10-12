@@ -6,6 +6,7 @@ import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.os.*;
 import dev.myflat.scanner.*;
+import java.io.File;
 import java.util.concurrent.*;
 
 /** Sequential, foreground CPU processing. Queue state survives process death. */
@@ -79,17 +80,34 @@ public final class ScanService extends Service {
         Bitmap source = null, result = null;
         try {
           ScanSettings options = ScanSettings.parse(page.settings);
-          source = Images.decode(store.file(page.original), options.maxEdge);
-          if (page.rotation != 0) {
-            Bitmap rotated = ImageMath.rotate(source, page.rotation);
-            if (rotated != source) source.recycle();
-            source = rotated;
+          File originalFile = store.file(page.original);
+          int exif =
+              new androidx.exifinterface.media.ExifInterface(originalFile)
+                  .getAttributeInt(androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION, 1);
+          ScanEngine.Result scan;
+          try (dev.myflat.scanner.ScanSource photo =
+              new dev.myflat.scanner.ScanSource(
+                  originalFile,
+                  exif,
+                  options.sourceRotation,
+                  options.sourceLeft,
+                  options.sourceTop,
+                  options.sourceRight,
+                  options.sourceBottom,
+                  options.pageRotation + page.rotation)) {
+            scan = new ScanEngine(this).process(photo, options.engine(), this::changed, null);
           }
-          ScanEngine.Result scan =
-              new ScanEngine(this).process(source, options.engine(), this::changed, null);
           result = scan.image;
           if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
+          if (options.outputRotation == 180) dev.myflat.scanner.ImageMath.rotate180InPlace(result);
           store.complete(page, result, options.quality);
+          if (getSharedPreferences("preferences", 0).getBoolean("gallery", false)) {
+            try {
+              Gallery.save(this, store.file(page.result));
+            } catch (Exception ex) {
+              android.util.Log.w("MyFlat", "Gallery save failed", ex);
+            }
+          }
           changed("页面已保存", 100);
         } catch (Throwable ex) {
           if (ex instanceof ThreadDeath) throw (ThreadDeath) ex;

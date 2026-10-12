@@ -14,20 +14,39 @@ import java.io.IOException;
 /** Read-only, grant-based access to explicitly exported cache files. */
 public final class ShareProvider extends ContentProvider {
   public static Uri uri(android.content.Context context, File file) {
-    return new Uri.Builder()
-        .scheme("content")
-        .authority(context.getPackageName() + ".files")
-        .appendPath(file.getName())
-        .build();
+    try {
+      File root = new File(context.getCacheDir(), "exports").getCanonicalFile();
+      String path = file.getCanonicalPath();
+      if (!path.startsWith(root.getPath() + File.separator))
+        throw new IllegalArgumentException("Invalid export");
+      Uri.Builder builder =
+          new Uri.Builder().scheme("content").authority(context.getPackageName() + ".files");
+      String relative = path.substring(root.getPath().length() + 1);
+      for (String part : relative.split(java.util.regex.Pattern.quote(File.separator)))
+        builder.appendPath(part);
+      return builder.build();
+    } catch (IOException ex) {
+      throw new IllegalArgumentException("Invalid export", ex);
+    }
   }
 
   private File resolve(Uri uri) throws FileNotFoundException {
     try {
       File root = new File(getContext().getCacheDir(), "exports").getCanonicalFile();
-      File file =
-          new File(root, uri.getLastPathSegment() == null ? "" : uri.getLastPathSegment())
-              .getCanonicalFile();
-      if (!root.equals(file.getParentFile()) || !file.isFile()) throw new FileNotFoundException();
+      java.util.List<String> parts = uri.getPathSegments();
+      if (parts.isEmpty() || parts.size() > 2) throw new FileNotFoundException();
+      File file = root;
+      for (String part : parts) {
+        if (part.isEmpty()
+            || part.equals(".")
+            || part.equals("..")
+            || part.indexOf('/') >= 0
+            || part.indexOf('\\') >= 0) throw new FileNotFoundException();
+        file = new File(file, part);
+      }
+      file = file.getCanonicalFile();
+      if (!file.getPath().startsWith(root.getPath() + File.separator) || !file.isFile())
+        throw new FileNotFoundException();
       return file;
     } catch (IOException ex) {
       throw new FileNotFoundException("Export no longer available");

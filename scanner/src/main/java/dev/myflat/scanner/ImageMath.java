@@ -51,9 +51,11 @@ public final class ImageMath {
 
   static float[] input(Bitmap bitmap, int w, int h, boolean gray) {
     int sw = bitmap.getWidth(), sh = bitmap.getHeight(), channels = gray ? 1 : 4;
-    int[] p = pixels(bitmap);
+    int[] p = new int[sw * Math.max(1, (sh + h - 1) / h + 1)];
     float[] out = new float[w * h * channels];
-    for (int y = 0; y < h; y++)
+    for (int y = 0; y < h; y++) {
+      int bandY = y * sh / h, bandEnd = Math.min(sh, Math.max(bandY + 1, (y + 1) * sh / h));
+      bitmap.getPixels(p, 0, sw, 0, bandY, sw, bandEnd - bandY);
       for (int x = 0; x < w; x++) {
         int x0 = x * sw / w,
             x1 = Math.max(x0 + 1, (x + 1) * sw / w),
@@ -63,7 +65,7 @@ public final class ImageMath {
         int n = 0;
         for (int yy = y0; yy < Math.min(sh, y1); yy++)
           for (int xx = x0; xx < Math.min(sw, x1); xx++) {
-            int color = p[yy * sw + xx];
+            int color = p[(yy - bandY) * sw + xx];
             r += (color >> 16) & 255;
             g += (color >> 8) & 255;
             b += color & 255;
@@ -79,6 +81,7 @@ public final class ImageMath {
           out[i + 3] = 1;
         }
       }
+    }
     return out;
   }
 
@@ -89,41 +92,148 @@ public final class ImageMath {
         ph = Math.max(h, Math.round(w / .75f));
     if (pw == w && ph == h) return source;
     int dx = (pw - w) / 2, dy = (ph - h) / 2;
-    int[] p = pixels(source), out = new int[pw * ph];
-    for (int y = 0; y < ph; y++)
-      for (int x = 0; x < pw; x++)
-        out[y * pw + x] =
-            p[Math.max(0, Math.min(h - 1, y - dy)) * w + Math.max(0, Math.min(w - 1, x - dx))];
-    return bitmap(out, pw, ph);
+    Bitmap padded = Bitmap.createBitmap(pw, ph, Bitmap.Config.ARGB_8888);
+    BitmapShader shader = new BitmapShader(source, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+    Matrix transform = new Matrix();
+    transform.setTranslate(dx, dy);
+    shader.setLocalMatrix(transform);
+    Paint paint = new Paint();
+    paint.setShader(shader);
+    new Canvas(padded).drawRect(0, 0, pw, ph, paint);
+    return padded;
   }
 
   static Bitmap sharpen(Bitmap bitmap) {
+    if (!bitmap.isMutable()) bitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true);
     int w = bitmap.getWidth(), h = bitmap.getHeight();
-    int[] p = pixels(bitmap), out = new int[p.length];
-    int[] k = {1, 2, 1};
-    for (int y = 0; y < h; y++)
+    int[] previous = new int[w], current = new int[w], next = new int[w], out = new int[w];
+    bitmap.getPixels(current, 0, w, 0, 0, w, 1);
+    System.arraycopy(current, 0, previous, 0, w);
+    bitmap.getPixels(next, 0, w, 0, Math.min(1, h - 1), w, 1);
+    int[] weights = {1, 2, 1};
+    for (int y = 0; y < h; y++) {
+      int[][] rows = {previous, current, next};
       for (int x = 0; x < w; x++) {
         float r = 0, g = 0, b = 0;
-        for (int yy = -1; yy <= 1; yy++)
+        for (int yy = 0; yy < 3; yy++)
           for (int xx = -1; xx <= 1; xx++) {
-            int
-                v =
-                    p[
-                        Math.max(0, Math.min(h - 1, y + yy)) * w
-                            + Math.max(0, Math.min(w - 1, x + xx))],
-                q = k[xx + 1] * k[yy + 1];
+            int v = rows[yy][Math.max(0, Math.min(w - 1, x + xx))],
+                q = weights[xx + 1] * weights[yy];
             r += ((v >> 16) & 255) * q;
             g += ((v >> 8) & 255) * q;
             b += (v & 255) * q;
           }
-        int v = p[y * w + x];
-        out[y * w + x] =
+        int v = current[x];
+        out[x] =
             rgb(
                 (2 * ((v >> 16) & 255) - r / 16) / 255,
                 (2 * ((v >> 8) & 255) - g / 16) / 255,
                 (2 * (v & 255) - b / 16) / 255);
       }
-    return bitmap(out, w, h);
+      bitmap.setPixels(out, 0, w, 0, y, w, 1);
+      int[] old = previous;
+      previous = current;
+      current = next;
+      next = old;
+      if (y + 2 < h) bitmap.getPixels(next, 0, w, 0, y + 2, w, 1);
+      else System.arraycopy(current, 0, next, 0, w);
+    }
+    return bitmap;
+  }
+
+  public interface Mapping {
+    void map(float[] points);
+  }
+
+  interface PixelSource {
+    int width();
+
+    int height();
+
+    int[] read(Rect region);
+  }
+
+  /** Rasterizes small patches so the full source and result never need Java pixel-array copies. */
+  static Bitmap raster(Bitmap source, int width, int height, Mapping mapping) {
+    return raster(
+        new PixelSource() {
+          public int width() {
+            return source.getWidth();
+          }
+
+          public int height() {
+            return source.getHeight();
+          }
+
+          public int[] read(Rect r) {
+            int[] pixels = new int[r.width() * r.height()];
+            source.getPixels(pixels, 0, r.width(), r.left, r.top, r.width(), r.height());
+            return pixels;
+          }
+        },
+        width,
+        height,
+        mapping);
+  }
+
+  static Bitmap raster(PixelSource source, int width, int height, Mapping mapping) {
+    Bitmap result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+    int sw = source.width(), sh = source.height();
+    for (int ty = 0; ty < height; ty += 256)
+      for (int tx = 0; tx < width; tx += 256) {
+        if (Thread.currentThread().isInterrupted()) {
+          result.recycle();
+          throw new java.util.concurrent.CancellationException();
+        }
+        int tw = Math.min(256, width - tx), th = Math.min(256, height - ty);
+        float[] points = new float[tw * th * 2];
+        for (int y = 0; y < th; y++)
+          for (int x = 0; x < tw; x++) {
+            int i = (y * tw + x) * 2;
+            points[i] = tx + x;
+            points[i + 1] = ty + y;
+          }
+        mapping.map(points);
+        float left = sw - 1, top = sh - 1, right = 0, bottom = 0;
+        for (int i = 0; i < points.length; i += 2) {
+          points[i] = Math.max(0, Math.min(sw - 1, points[i]));
+          points[i + 1] = Math.max(0, Math.min(sh - 1, points[i + 1]));
+          left = Math.min(left, points[i]);
+          right = Math.max(right, points[i]);
+          top = Math.min(top, points[i + 1]);
+          bottom = Math.max(bottom, points[i + 1]);
+        }
+        int bx = (int) left,
+            by = (int) top,
+            bw = Math.min(sw - 1, (int) Math.ceil(right) + 1) - bx + 1,
+            bh = Math.min(sh - 1, (int) Math.ceil(bottom) + 1) - by + 1;
+        int[] input = source.read(new Rect(bx, by, bx + bw, by + bh)), out = new int[tw * th];
+        for (int i = 0; i < out.length; i++)
+          out[i] = sample(input, bw, bh, points[i * 2] - bx, points[i * 2 + 1] - by);
+        result.setPixels(out, 0, tw, tx, ty, tw, th);
+      }
+    return result;
+  }
+
+  /** Turns a completed page over without allocating another sensor-sized bitmap. */
+  public static void rotate180InPlace(Bitmap image) {
+    int width = image.getWidth(), height = image.getHeight();
+    int[] top = new int[width], bottom = new int[width];
+    for (int y = 0; y < (height + 1) / 2; y++) {
+      int opposite = height - 1 - y;
+      image.getPixels(top, 0, width, 0, y, width, 1);
+      image.getPixels(bottom, 0, width, 0, opposite, width, 1);
+      for (int x = 0; x < width / 2; x++) {
+        int t = top[x];
+        top[x] = top[width - 1 - x];
+        top[width - 1 - x] = t;
+        t = bottom[x];
+        bottom[x] = bottom[width - 1 - x];
+        bottom[width - 1 - x] = t;
+      }
+      image.setPixels(bottom, 0, width, 0, y, width, 1);
+      if (opposite != y) image.setPixels(top, 0, width, 0, opposite, width, 1);
+    }
   }
 
   public static Bitmap rotate(Bitmap b, int degrees) {
@@ -139,22 +249,11 @@ public final class ImageMath {
         right = distance(corners, 2, 4);
     int w = Math.max(2, Math.round((top + bottom) / 2)),
         h = Math.max(2, Math.round((left + right) / 2));
-    if ((long) w * h > 16_000_000) throw new IllegalArgumentException("裁剪尺寸过大");
+    if ((long) w * h > Integer.MAX_VALUE / 4) throw new IllegalArgumentException("裁剪尺寸过大");
     float[] dest = {0, 0, w - 1, 0, w - 1, h - 1, 0, h - 1};
     Matrix map = new Matrix();
     if (!map.setPolyToPoly(dest, 0, corners, 0, 4)) throw new IllegalArgumentException("裁剪框无效");
-    int[] p = pixels(b), out = new int[w * h];
-    float[] row = new float[w * 2];
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        row[x * 2] = x;
-        row[x * 2 + 1] = y;
-      }
-      map.mapPoints(row);
-      for (int x = 0; x < w; x++)
-        out[y * w + x] = sample(p, b.getWidth(), b.getHeight(), row[x * 2], row[x * 2 + 1]);
-    }
-    return bitmap(out, w, h);
+    return raster(b, w, h, map::mapPoints);
   }
 
   private static float distance(float[] p, int a, int b) {
