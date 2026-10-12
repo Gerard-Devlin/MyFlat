@@ -24,7 +24,7 @@ jobs:
       - name: Check bundled model hashes
         run: python3 tools/verify_models.py --allow-missing
       - name: Build, test and lint
-        run: bash gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --console=plain
+        run: bash gradlew :app:testDebugUnitTest :scanner:testDebugUnitTest :app:lintDebug :app:assembleDebug --console=plain
       - uses: actions/upload-artifact@v4
         with:
           name: MyFlat-debug-apk

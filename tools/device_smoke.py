@@ -23,6 +23,7 @@ def run(*values):
     subprocess.run(command + list(values), check=True)
 run("install", "-r", str(ROOT / "app/build/outputs/apk/debug/app-debug.apk"))
 run("install", "-r", str(ROOT / "app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"))
+run("shell", "rm", "-f", "/sdcard/Android/data/dev.myflat.app/files/integration-report.json")
 run("shell", "am", "instrument", "-w", "dev.myflat.app.test/dev.myflat.app.SmokeInstrumentation")
 with tempfile.TemporaryDirectory(prefix="myflat-test-") as directory:
     file = Path(directory) / "report.json"

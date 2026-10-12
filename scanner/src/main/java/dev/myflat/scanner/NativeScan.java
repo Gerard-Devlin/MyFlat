@@ -14,6 +14,8 @@ public final class NativeScan {
 
   public static native void dof(Buffer output);
 
+  public static native void calcEulerAngleFromMatrix(float[] matrix, float[] angles);
+
   public static native void calcFreeformOutputSize(int width, Buffer model, Buffer size);
 
   public static native void otr(Buffer model, Buffer remap);

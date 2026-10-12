@@ -6,6 +6,7 @@ import android.graphics.*;
 import android.graphics.pdf.PdfRenderer;
 import android.net.Uri;
 import android.os.*;
+import android.view.View;
 import dev.myflat.scanner.*;
 import java.io.*;
 import java.security.MessageDigest;
@@ -61,6 +62,30 @@ public final class SmokeInstrumentation extends Instrumentation {
   private void runTests() throws Exception {
     runOnMainSync(
         () -> {
+          Bitmap launcher = Bitmap.createBitmap(216, 216, Bitmap.Config.ARGB_8888);
+          android.graphics.drawable.Drawable icon =
+              context.getApplicationInfo().loadIcon(context.getPackageManager());
+          icon.setBounds(0, 0, 216, 216);
+          icon.draw(new Canvas(launcher));
+          require(launcher.getPixel(108, 20) == Color.BLACK, "桌面图标使用纯黑底色并留出边距");
+          int top = 216, bottom = 0;
+          for (int y = 0; y < 216; y++)
+            for (int x = 0; x < 216; x++) {
+              int pixel = launcher.getPixel(x, y);
+              if (Color.alpha(pixel) > 0 && Color.red(pixel) > 100 && Color.green(pixel) > 100) {
+                top = Math.min(top, y);
+                bottom = Math.max(bottom, y);
+              }
+            }
+          require(top > 22 && bottom < 194, "图标中的纸团完整保留且不会贴边裁切");
+          try (OutputStream out =
+              new FileOutputStream(
+                  new File(context.getExternalFilesDir(null), "launcher-preview.png"))) {
+            launcher.compress(Bitmap.CompressFormat.PNG, 100, out);
+          } catch (IOException ex) {
+            throw new AssertionError(ex);
+          }
+          launcher.recycle();
           Bitmap base = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888);
           base.eraseColor(Color.BLACK);
           PageCanvas view = new PageCanvas(context);
@@ -94,6 +119,27 @@ public final class SmokeInstrumentation extends Instrumentation {
       fixture = BitmapFactory.decodeStream(in);
     }
     require(fixture != null && fixture.getWidth() == 1279, "固定验收图可解码");
+    try (LivePageDetector detector = new LivePageDetector(context)) {
+      Bitmap cameraFrame = Bitmap.createScaledBitmap(fixture, 144, 192, true);
+      LivePageDetector.Result detected = detector.detect(cameraFrame, false, .5f);
+      require(!detected.outlines.isEmpty(), "实时模型在验收书页上检测到曲面轮廓");
+      float[] edge = detected.outlines.get(0);
+      require(
+          Math.abs(edge[0] - .205f) < .06f
+              && Math.abs(edge[1] - .137f) < .06f
+              && Math.abs(edge[96] - .743f) < .06f
+              && Math.abs(edge[97] - .864f) < .06f,
+          "取景轮廓与实际展平页角一致");
+      require(detector.detect(cameraFrame, false, .5f).outlines.size() == 1, "实时解释器可连续复用");
+      cameraFrame.eraseColor(Color.WHITE);
+      require(
+          detector.detect(cameraFrame, false, .5f).state == PageGeometry.State.PAGE_INVALID,
+          "空白取景显示寻找目标，不伪造检测框");
+      cameraFrame.eraseColor(Color.BLACK);
+      require(detector.detect(cameraFrame, false, .5f).outlines.isEmpty(), "黑暗取景不触发自动拍摄");
+      cameraFrame.recycle();
+    }
+    testCameraGuidance();
     long folder = store.createFolder("集成测试文件夹");
     String doc = store.createDocument(folder, "MyFlat 集成验收");
     ScanSettings raw = new ScanSettings();
@@ -244,7 +290,138 @@ public final class SmokeInstrumentation extends Instrumentation {
     waitReady(scanned, 90000);
     DocumentStore.Page result = store.page(scanPage);
     require(result.width > 500 && result.width < 900 && result.height > 900, "完整书页扫描输出尺寸正确");
+    File stages = new File(context.getExternalFilesDir(null), "guide-stages");
+    stages.mkdirs();
+    ScanEngine.Result example =
+        new ScanEngine(context)
+            .process(
+                fixture,
+                new ScanEngine.Options(),
+                (name, percent) -> {},
+                (name, image) -> {
+                  try (OutputStream out = new FileOutputStream(new File(stages, name + ".jpg"))) {
+                    image.compress(Bitmap.CompressFormat.JPEG, 95, out);
+                  }
+                });
+    require(
+        example.image.getWidth() == result.width && example.image.getHeight() == result.height,
+        "引导示例的每一步来自完整扫描流程");
+    if (example.image != fixture) example.image.recycle();
     fixture.recycle();
+  }
+
+  private void testCameraGuidance() throws Exception {
+    SharedPreferences prefs = context.getSharedPreferences("CameraActivity", Context.MODE_PRIVATE);
+    boolean seen = prefs.getBoolean("scan_guide_seen", false);
+    prefs.edit().putBoolean("scan_guide_seen", false).commit();
+    CameraActivity camera =
+        (CameraActivity)
+            startActivitySync(
+                new Intent(context, CameraActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+    waitForIdleSync();
+    java.lang.reflect.Field dialogField = CameraActivity.class.getDeclaredField("walkthrough");
+    dialogField.setAccessible(true);
+    runOnMainSync(
+        () -> {
+          try {
+            ScanGuideDialog guide = (ScanGuideDialog) dialogField.get(camera);
+            require(guide != null && guide.isShowing() && guide.step() == 0, "首次进入显示扫描引导");
+            for (int step = 0; step < 4; step++) {
+              clickText(guide.getWindow().getDecorView(), "下一步");
+              require(guide.step() == step + 1, "引导进入第 " + (step + 2) + " 页");
+            }
+            clickText(guide.getWindow().getDecorView(), "开始扫描");
+            require(prefs.getBoolean("scan_guide_seen", false), "完成引导记录首次进入状态");
+            require(
+                findText(camera.getWindow().getDecorView(), "正在寻找扫描目标…") != null,
+                "手动拍摄模式也显示寻找扫描目标提示");
+            clickDescription(camera.getWindow().getDecorView(), "更多");
+            java.lang.reflect.Field menuField = CameraActivity.class.getDeclaredField("cameraMenu");
+            menuField.setAccessible(true);
+            Dialog menu = (Dialog) menuField.get(camera);
+            require(
+                findText(menu.getWindow().getDecorView(), "增强颜色") != null
+                    && findText(menu.getWindow().getDecorView(), "去除手指") != null,
+                "更多打开深色快捷开关面板");
+            boolean enhanced = ScanSettings.defaults(context).enhance;
+            clickDescription(menu.getWindow().getDecorView(), "增强颜色");
+            require(ScanSettings.defaults(context).enhance != enhanced, "快捷开关立即保存处理设置");
+            clickDescription(menu.getWindow().getDecorView(), "增强颜色");
+            boolean audible = prefs.getBoolean("shutter_sound", false);
+            clickDescription(menu.getWindow().getDecorView(), audible ? "快门声音开" : "快门声音关");
+            require(prefs.getBoolean("shutter_sound", false) != audible, "快门声音开关保存并更新状态");
+            clickDescription(menu.getWindow().getDecorView(), audible ? "快门声音关" : "快门声音开");
+            clickDescription(menu.getWindow().getDecorView(), "扫描指南");
+            guide = (ScanGuideDialog) dialogField.get(camera);
+            require(guide != null && guide.isShowing() && guide.step() == 0, "更多中可重新查看引导");
+            guide.dismiss();
+            clickDescription(camera.getWindow().getDecorView(), "选择保存文件夹");
+            menu = (Dialog) menuField.get(camera);
+            require(findText(menu.getWindow().getDecorView(), "保存扫描到") != null, "保存位置打开文件夹卡片");
+            clickDescription(menu.getWindow().getDecorView(), "查看全部文件夹");
+            menu = (Dialog) menuField.get(camera);
+            require(
+                "＋ 新建文件夹"
+                    .equals(
+                        ((AlertDialog) menu)
+                            .getListView()
+                            .getAdapter()
+                            .getItem(
+                                ((AlertDialog) menu).getListView().getAdapter().getCount() - 1)),
+                "文件夹卡片可进入完整列表并新建文件夹");
+            menu.dismiss();
+          } catch (ReflectiveOperationException ex) {
+            throw new AssertionError(ex);
+          }
+        });
+    runOnMainSync(camera::finish);
+    waitForIdleSync();
+    CameraActivity again =
+        (CameraActivity)
+            startActivitySync(
+                new Intent(context, CameraActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+    waitForIdleSync();
+    runOnMainSync(
+        () -> {
+          try {
+            require(dialogField.get(again) == null, "第二次进入不重复显示首次引导");
+          } catch (IllegalAccessException ex) {
+            throw new AssertionError(ex);
+          }
+          again.finish();
+        });
+    waitForIdleSync();
+    prefs.edit().putBoolean("scan_guide_seen", seen).commit();
+  }
+
+  private View findText(View root, String text) {
+    if (root instanceof android.widget.TextView
+        && text.contentEquals(((android.widget.TextView) root).getText())) return root;
+    if (root instanceof android.view.ViewGroup) {
+      android.view.ViewGroup group = (android.view.ViewGroup) root;
+      for (int i = 0; i < group.getChildCount(); i++) {
+        View found = findText(group.getChildAt(i), text);
+        if (found != null) return found;
+      }
+    }
+    return null;
+  }
+
+  private void clickText(View root, String text) {
+    View target = findText(root, text);
+    if (target == null || !target.performClick())
+      throw new AssertionError("Missing action: " + text);
+  }
+
+  private boolean clickDescription(View root, String text) {
+    if (text.equals(String.valueOf(root.getContentDescription())) && root.performClick())
+      return true;
+    if (root instanceof android.view.ViewGroup) {
+      android.view.ViewGroup group = (android.view.ViewGroup) root;
+      for (int i = 0; i < group.getChildCount(); i++)
+        if (clickDescription(group.getChildAt(i), text)) return true;
+    }
+    return false;
   }
 
   private void waitReady(String document, long timeout) throws Exception {

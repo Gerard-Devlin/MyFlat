@@ -57,10 +57,19 @@ public final class MainActivity extends Activity {
     }
     refresh();
     if (Build.VERSION.SDK_INT >= 33
+        && !getIntent().getBooleanExtra("import", false)
         && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED)
       requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 3);
     MyFlatApp.of(this).startProcessing();
+    consumeImport();
+  }
+
+  private void consumeImport() {
+    if (getIntent().getBooleanExtra("import", false)) {
+      getIntent().removeExtra("import");
+      pick();
+    }
   }
 
   @Override
@@ -109,6 +118,7 @@ public final class MainActivity extends Activity {
     selected.clear();
     trash = false;
     refresh();
+    consumeImport();
   }
 
   private String folderName() {
