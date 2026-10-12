@@ -1,0 +1,288 @@
+{
+  "models": [
+    {
+      "file": "blackpoint_classification_v1_0_1.tflite",
+      "bytes": 63540,
+      "sha256": "f44f8193b97847cd550dff32fa8d8df65451072aa35bddd3c8cf80cd44bfd9ed",
+      "inputs": [
+        {
+          "name": "inputs_0",
+          "shape": [
+            1,
+            320,
+            320,
+            4
+          ],
+          "type": "FLOAT32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Identity",
+          "shape": [
+            1,
+            1
+          ],
+          "type": "FLOAT32"
+        }
+      ]
+    },
+    {
+      "file": "blackpoint_v1_0_1.tflite",
+      "bytes": 923164,
+      "sha256": "aaaccd1a447c281409945f61e0be907c9c836b353abb62907440870a3fd5382a",
+      "inputs": [
+        {
+          "name": "inputs_0",
+          "shape": [
+            1,
+            320,
+            320,
+            4
+          ],
+          "type": "FLOAT32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Identity",
+          "shape": [
+            1,
+            20,
+            20,
+            4
+          ],
+          "type": "FLOAT32"
+        }
+      ]
+    },
+    {
+      "file": "content_mask_v2.tflite",
+      "bytes": 2119504,
+      "sha256": "d2dfb67d6314e8d43a52071c0b3b30d1ecd57a00a3c3eae6d01ac2ebc7135585",
+      "inputs": [
+        {
+          "name": "input",
+          "shape": [
+            1,
+            320,
+            320,
+            1
+          ],
+          "type": "FLOAT32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output/Sigmoid",
+          "shape": [
+            1,
+            320,
+            320,
+            1
+          ],
+          "type": "FLOAT32"
+        }
+      ]
+    },
+    {
+      "file": "enhance_v10.tflite",
+      "bytes": 989468,
+      "sha256": "e6affaf53469648b3f17b048a530aba0600fa8484846a539d0ce44cb05b3ddc0",
+      "inputs": [
+        {
+          "name": "inputs_0",
+          "shape": [
+            1,
+            320,
+            320,
+            4
+          ],
+          "type": "FLOAT32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Identity",
+          "shape": [
+            1,
+            320,
+            320,
+            4
+          ],
+          "type": "FLOAT32"
+        }
+      ]
+    },
+    {
+      "file": "finger_mask_v1_1.tflite",
+      "bytes": 156244,
+      "sha256": "94bc3690ed6fe1630d04b5c5cd09fe919e7aef3551ba2f4f9391e18e701f8aea",
+      "inputs": [
+        {
+          "name": "inputs_0",
+          "shape": [
+            1,
+            320,
+            320,
+            4
+          ],
+          "type": "FLOAT32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Identity",
+          "shape": [
+            1,
+            320,
+            320,
+            1
+          ],
+          "type": "FLOAT32"
+        }
+      ]
+    },
+    {
+      "file": "freeform_v3_2.tflite",
+      "bytes": 4989776,
+      "sha256": "571deb5e42abe191a9cbf21eb47d71ff125f875c95eedcc17c89e8640b7ce9d1",
+      "inputs": [
+        {
+          "name": "input",
+          "shape": [
+            1,
+            192,
+            144,
+            4
+          ],
+          "type": "FLOAT32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Identity",
+          "shape": [
+            1,
+            1251
+          ],
+          "type": "FLOAT32"
+        }
+      ]
+    },
+    {
+      "file": "handwriting_removal_v2_0_2.tflite",
+      "bytes": 2009264,
+      "sha256": "d8016f7846320c68c7f45fb63317a503fad8d5192996ac117cb185b15b8cd5b0",
+      "inputs": [
+        {
+          "name": "inputs_0",
+          "shape": [
+            1,
+            480,
+            480,
+            4
+          ],
+          "type": "FLOAT32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Identity",
+          "shape": [
+            1,
+            480,
+            480,
+            4
+          ],
+          "type": "FLOAT32"
+        }
+      ]
+    },
+    {
+      "file": "inpainter_v1_0_0.tflite",
+      "bytes": 5701908,
+      "sha256": "2cde89fe1ab8d9adebad2e54d911eca632523b8cf90ac6e82531442ea9171af3",
+      "inputs": [
+        {
+          "name": "inputs_0",
+          "shape": [
+            1,
+            320,
+            320,
+            4
+          ],
+          "type": "FLOAT32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Identity",
+          "shape": [
+            1,
+            320,
+            320,
+            4
+          ],
+          "type": "FLOAT32"
+        }
+      ]
+    },
+    {
+      "file": "optp_v3_3.tflite",
+      "bytes": 1909916,
+      "sha256": "fef7d0b8434c3d517b4a08021c15282f8e4fe8a0b5a33d3a6b8cce84b58f5934",
+      "inputs": [
+        {
+          "name": "0",
+          "shape": [
+            1,
+            192,
+            144,
+            4
+          ],
+          "type": "FLOAT32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Identity",
+          "shape": [
+            1,
+            5
+          ],
+          "type": "FLOAT32"
+        }
+      ]
+    },
+    {
+      "file": "pptp_v1_1_0.tflite",
+      "bytes": 5847376,
+      "sha256": "3d2caac076f0d85c0bba00ecb67a4a6989265e944b662c22c59b5b7aec5b8488",
+      "inputs": [
+        {
+          "name": "inputs_0",
+          "shape": [
+            1,
+            320,
+            320,
+            4
+          ],
+          "type": "FLOAT32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Identity",
+          "shape": [
+            1,
+            320,
+            320,
+            2
+          ],
+          "type": "FLOAT32"
+        }
+      ]
+    }
+  ]
+}

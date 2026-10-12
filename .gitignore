@@ -1,0 +1,28 @@
+# Machine state and build output
+.android-tools/
+.gradle/
+.idea/
+**/build/
+local.properties
+*.iml
+*.log
+*.jks
+*.keystore
+captures/
+# Generated validation output
+artifacts/
+
+# Local inspection and machine-specific helpers
+analysis/
+tools/android/
+
+# Local-only inspection and acceptance material
+docs/validation/
+docs/screenshots/
+tests/fixtures/
+tools/adapt_native.py
+scanner/native-manifest.json
+gradle/gradle-daemon-jvm.properties
+
+# Locally supplied model weights
+models/**/*.tflite
