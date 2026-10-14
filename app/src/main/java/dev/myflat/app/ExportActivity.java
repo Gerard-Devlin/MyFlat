@@ -21,6 +21,8 @@ public final class ExportActivity extends Activity {
   private File output;
   private TextView progressText;
   private ProgressBar progressBar;
+  private TextView progressMessage;
+  private java.util.concurrent.Future<?> exportTask;
   private static final String[] QUALITIES = {"最低", "低", "中等", "高", "最高"};
 
   static void open(
@@ -36,6 +38,7 @@ public final class ExportActivity extends Activity {
 
   @Override
   public void onCreate(Bundle state) {
+    AppAppearance.prepare(this);
     super.onCreate(state);
     if (state == null) {
       ids.addAll(getIntent().getStringArrayListExtra("pages"));
@@ -56,11 +59,17 @@ public final class ExportActivity extends Activity {
       String path = state.getString("output");
       if (path != null) output = new File(path);
     }
-    if (output != null) finishScreen();
-    else {
-      build();
-      if (format == Exporter.Format.ZIP) zipName();
-    }
+    FolderSecurity.requirePages(
+        this,
+        ids,
+        () -> {
+          if (output != null) finishScreen();
+          else {
+            build();
+            if (format == Exporter.Format.ZIP) zipName();
+          }
+        },
+        this::finish);
   }
 
   @Override
@@ -95,6 +104,7 @@ public final class ExportActivity extends Activity {
     header.addView(Ui.iconButton(this, "back", "返回", this::finish));
     TextView title = Ui.text(this, name + extension(), 20, Ui.INK);
     title.setBackgroundResource(R.drawable.myflat_dash_underline);
+    AppAppearance.keepText(title);
     title.setSingleLine(true);
     title.setEllipsize(android.text.TextUtils.TruncateAt.END);
     title.setGravity(Gravity.CENTER_VERTICAL);
@@ -117,7 +127,7 @@ public final class ExportActivity extends Activity {
             "顺序",
             reverse ? "倒序" : "正序",
             () ->
-                new AlertDialog.Builder(this)
+                Ui.alert(this)
                     .setTitle("顺序")
                     .setSingleChoiceItems(
                         new String[] {"正序", "倒序"},
@@ -183,9 +193,13 @@ public final class ExportActivity extends Activity {
       FrameLayout cover = new FrameLayout(this);
       cover.setBackgroundColor(Color.TRANSPARENT);
       if (i == pages.size()) {
-        TextView plus = Ui.text(this, "+", 28, 0xffbdbdbd);
-        plus.setBackground(Ui.shape(0xffdddddd, Ui.dp(this, 2)));
-        plus.setGravity(Gravity.CENTER);
+        FrameLayout plus = new FrameLayout(this);
+        plus.setBackground(Ui.shape(0xffdddddd, Ui.dp(this, 4)));
+        ImageView addIcon = new ImageView(this);
+        addIcon.setImageResource(R.drawable.myflat_export_add_page);
+        plus.addView(
+            addIcon,
+            new FrameLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 40), Gravity.CENTER));
         cover.addView(
             plus, new FrameLayout.LayoutParams(Math.round(width * .71f), -1, Gravity.CENTER));
         cell.setContentDescription("添加页面");
@@ -226,7 +240,7 @@ public final class ExportActivity extends Activity {
             });
         cell.setOnClickListener(
             v ->
-                new AlertDialog.Builder(this)
+                Ui.alert(this)
                     .setItems(
                         new String[] {"查看页面", "移除此页"},
                         (d, w) -> {
@@ -279,63 +293,15 @@ public final class ExportActivity extends Activity {
   }
 
   private void rename() {
-    LinearLayout body = Ui.column(this);
-    Ui.padding(body, 24, 8);
-    EditText input = Ui.input(this, name, "文件名称");
-    android.graphics.drawable.GradientDrawable box = Ui.shape(Color.WHITE, Ui.dp(this, 4));
-    box.setStroke(Ui.dp(this, 1), Ui.GREEN);
-    input.setBackground(box);
-    Ui.padding(input, 12, 12);
-    body.addView(input);
-    body.addView(Ui.spacer(this, 24));
-    LinearLayout heading = Ui.row(this);
-    heading.addView(Ui.bold(this, "常用文件名", 14), new LinearLayout.LayoutParams(0, -2, 1));
-    heading.addView(
-        Ui.iconButton(
-            this,
-            "edit",
-            "编辑常用文件名",
-            () ->
-                Ui.rename(
-                    this,
-                    "常用文件名",
-                    getSharedPreferences("export", 0).getString("presets", "扫描,报告,文档"),
-                    text ->
-                        getSharedPreferences("export", 0)
-                            .edit()
-                            .putString("presets", text)
-                            .apply())));
-    body.addView(heading);
-    for (String preset :
-        getSharedPreferences("export", 0).getString("presets", "扫描,报告,文档").split(",")) {
-      TextView chip =
-          Ui.pill(
-              this,
-              preset
-                  + "_"
-                  + new java.text.SimpleDateFormat("yyyyMMdd", Locale.ROOT).format(new Date()),
-              false,
-              () ->
-                  input.setText(
-                      preset
-                          + "_"
-                          + new java.text.SimpleDateFormat("yyyyMMdd", Locale.ROOT)
-                              .format(new Date())));
-      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-      lp.topMargin = Ui.dp(this, 8);
-      body.addView(chip, lp);
-    }
-    new AlertDialog.Builder(this)
-        .setTitle("设置 PDF 文件名")
-        .setView(body)
-        .setNegativeButton("取消", null)
-        .setPositiveButton(
-            "确定",
-            (d, w) -> {
-              name = Exporter.safeName(input.getText().toString());
-              build();
-            })
-        .show();
+    FilenamePresets.rename(
+        this,
+        format == Exporter.Format.PDF ? "PDF" : "ZIP",
+        name,
+        getIntent().getStringExtra("title"),
+        chosen -> {
+          name = chosen;
+          build();
+        });
   }
 
   private void zipName() {
@@ -343,7 +309,7 @@ public final class ExportActivity extends Activity {
     LinearLayout body = Ui.column(this);
     Ui.padding(body, 24, 16);
     body.addView(input);
-    new AlertDialog.Builder(this)
+    Ui.alert(this)
         .setTitle("创建 ZIP")
         .setView(body)
         .setNegativeButton("取消", (d, w) -> finish())
@@ -553,33 +519,29 @@ public final class ExportActivity extends Activity {
   }
 
   private void addPages() {
-    List<DocumentStore.Page> candidates = new ArrayList<>();
-    for (DocumentStore.Document doc : MyFlatApp.of(this).store.documents(0, "", false))
-      for (DocumentStore.Page p : MyFlatApp.of(this).store.pages(doc.id))
-        if ("ready".equals(p.status) && !ids.contains(p.id)) candidates.add(p);
-    if (candidates.isEmpty()) {
-      Toast.makeText(this, "没有其他可添加的页面", Toast.LENGTH_SHORT).show();
-      return;
+    DocumentStore store = MyFlatApp.of(this).store;
+    Set<Long> folders = new LinkedHashSet<>();
+    for (String id : ids) {
+      DocumentStore.Page page = store.page(id);
+      DocumentStore.Document doc = page == null ? null : store.document(page.document);
+      if (doc != null) folders.add(doc.folder);
     }
-    boolean[] checked = new boolean[candidates.size()];
-    String[] names = new String[candidates.size()];
-    for (int i = 0; i < names.length; i++)
-      names[i] =
-          MyFlatApp.of(this).store.document(candidates.get(i).document).title
-              + " · "
-              + (candidates.get(i).position + 1);
-    new AlertDialog.Builder(this)
-        .setTitle("添加页面")
-        .setMultiChoiceItems(names, checked, (d, w, b) -> checked[w] = b)
-        .setNegativeButton("取消", null)
-        .setPositiveButton(
-            "添加",
-            (d, w) -> {
-              for (int i = 0; i < checked.length; i++)
-                if (checked[i]) ids.add(candidates.get(i).id);
-              build();
-            })
-        .show();
+    List<DocumentStore.Page> candidates = new ArrayList<>();
+    for (long folder : folders)
+      if (FolderSecurity.isAccessible(this, folder))
+        for (DocumentStore.Document doc : store.documents(folder, "", false))
+          for (DocumentStore.Page page : store.pages(doc.id))
+            if ("ready".equals(page.status)) candidates.add(page);
+    ExportPageSelection.show(
+        this,
+        name,
+        candidates,
+        new ArrayList<>(ids),
+        chosen -> {
+          ids.clear();
+          ids.addAll(chosen);
+          build();
+        });
   }
 
   private void create() {
@@ -591,53 +553,93 @@ public final class ExportActivity extends Activity {
     }
     busy = true;
     LinearLayout root = Ui.root(this);
-    LinearLayout area = Ui.column(this);
-    area.setGravity(Gravity.CENTER);
-    Ui.padding(area, 32, 32);
-    progressText = Ui.bold(this, "正在创建 " + (format == Exporter.Format.PDF ? "PDF" : "ZIP"), 20);
+    LinearLayout header = Ui.row(this);
+    header.addView(Ui.iconButton(this, "close", "关闭", this::onBackPressed));
+    root.addView(header);
+    FrameLayout area = new FrameLayout(this);
+    root.addView(area, new LinearLayout.LayoutParams(-1, 0, 1));
+    progressText = Ui.bold(this, "正在创建 " + (format == Exporter.Format.PDF ? "PDF" : "ZIP"), 24);
     progressText.setGravity(Gravity.CENTER);
-    area.addView(progressText);
-    area.addView(Ui.spacer(this, 32));
+    FrameLayout.LayoutParams titleParams = new FrameLayout.LayoutParams(-1, -2);
+    titleParams.setMargins(Ui.dp(this, 40), 0, Ui.dp(this, 40), 0);
+    area.addView(progressText, titleParams);
+    com.airbnb.lottie.LottieAnimationView animation =
+        new com.airbnb.lottie.LottieAnimationView(this);
+    animation.setAnimation(R.raw.myflat_export_processing);
+    animation.setRepeatCount(com.airbnb.lottie.LottieDrawable.INFINITE);
+    animation.playAnimation();
+    FrameLayout.LayoutParams animationParams =
+        new FrameLayout.LayoutParams(
+            Ui.dp(this, 100), Ui.dp(this, 100), Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+    area.addView(animation, animationParams);
+    TextView percentage = Ui.bold(this, "0%", 58);
+    percentage.setGravity(Gravity.CENTER);
+    percentage.setTextColor(Ui.GREEN);
+    FrameLayout.LayoutParams percentageParams = new FrameLayout.LayoutParams(-1, -2);
+    area.addView(percentage, percentageParams);
+    progressMessage = Ui.bold(this, "0 / " + pages.size(), 14);
+    progressMessage.setGravity(Gravity.CENTER);
+    progressMessage.setTextColor(0xffaaaaaa);
+    FrameLayout.LayoutParams messageParams = new FrameLayout.LayoutParams(-1, -2);
+    area.addView(progressMessage, messageParams);
     progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
     progressBar.setMax(pages.size());
-    area.addView(progressBar, new LinearLayout.LayoutParams(-1, Ui.dp(this, 8)));
-    root.addView(area, new LinearLayout.LayoutParams(-1, -1));
-    MyFlatApp.of(this)
-        .io
-        .submit(
-            () -> {
-              try {
-                File file =
-                    Exporter.create(
-                        this,
-                        name,
-                        pages,
-                        format,
-                        false,
-                        grayscale,
-                        quality,
-                        (done, total) ->
-                            runOnUiThread(
-                                () -> {
-                                  progressText.setText("正在创建 " + done + " / " + total);
-                                  progressBar.setProgress(done);
-                                }));
-                saveDownload(file);
-                runOnUiThread(
-                    () -> {
-                      output = file;
-                      busy = false;
-                      finishScreen();
-                    });
-              } catch (Exception ex) {
-                runOnUiThread(
-                    () -> {
-                      busy = false;
-                      build();
-                      Ui.error(this, ex);
-                    });
-              }
-            });
+    progressBar.setVisibility(View.GONE);
+    area.addView(progressBar);
+    area.addOnLayoutChangeListener(
+        (v, l, t, r, b, ol, ot, or, ob) -> {
+          int height = b - t;
+          titleParams.topMargin = Math.max(Ui.dp(this, 32), Math.round(height * .18f));
+          animationParams.topMargin = Math.round(height * .29f);
+          percentageParams.topMargin = Math.round(height * .40f);
+          messageParams.topMargin =
+              percentageParams.topMargin + percentage.getHeight() + Ui.dp(this, 68);
+          if (height != ob - ot) {
+            progressText.setLayoutParams(titleParams);
+            animation.setLayoutParams(animationParams);
+            percentage.setLayoutParams(percentageParams);
+            progressMessage.setLayoutParams(messageParams);
+          }
+        });
+    exportTask =
+        MyFlatApp.of(this)
+            .io
+            .submit(
+                () -> {
+                  try {
+                    File file =
+                        Exporter.create(
+                            this,
+                            name,
+                            pages,
+                            format,
+                            false,
+                            grayscale,
+                            quality,
+                            (done, total) ->
+                                runOnUiThread(
+                                    () -> {
+                                      percentage.setText(done * 100 / Math.max(1, total) + "%");
+                                      progressMessage.setText(done + " / " + total);
+                                      progressBar.setProgress(done);
+                                    }));
+                    saveDownload(file);
+                    runOnUiThread(
+                        () -> {
+                          output = file;
+                          busy = false;
+                          finishScreen();
+                        });
+                  } catch (Exception ex) {
+                    runOnUiThread(
+                        () -> {
+                          busy = false;
+                          if (isFinishing() || isDestroyed()) return;
+                          build();
+                          Ui.error(this, ex);
+                        });
+                  }
+                });
   }
 
   private void saveDownload(File file) throws IOException {
@@ -671,62 +673,100 @@ public final class ExportActivity extends Activity {
   private void finishScreen() {
     LinearLayout root = Ui.root(this);
     LinearLayout header = Ui.row(this);
-    header.addView(Ui.iconButton(this, "back", "返回", this::finish));
-    header.addView(Ui.bold(this, format == Exporter.Format.PDF ? "创建 PDF" : "创建 ZIP", 20));
+    header.addView(Ui.iconButton(this, "close", "关闭", this::finish));
     root.addView(header);
     LinearLayout body = Ui.column(this);
-    body.setGravity(Gravity.CENTER);
-    Ui.padding(body, 32, 32);
-    TextView title = Ui.bold(this, "文件已生成", 24);
+    body.setGravity(Gravity.CENTER_HORIZONTAL);
+    Ui.padding(body, 32, 0);
+    body.addView(Ui.spacer(this, 32));
+    TextView title = Ui.bold(this, format == Exporter.Format.PDF ? "PDF已创建。" : "ZIP已创建。", 24);
     title.setGravity(Gravity.CENTER);
     body.addView(title);
-    body.addView(Ui.spacer(this, 48));
-    TextView check = Ui.text(this, "✓", 64, Ui.GREEN);
-    check.setGravity(Gravity.CENTER);
-    body.addView(check);
-    body.addView(Ui.spacer(this, 24));
-    TextView filename = Ui.text(this, output.getName(), 16, Ui.INK);
-    filename.setGravity(Gravity.CENTER);
-    body.addView(filename);
-    TextView location =
-        Ui.text(
-            this, Build.VERSION.SDK_INT >= 29 ? "文件已保存到 下载 / MyFlat" : "保存文件到你的设备", 14, Ui.MUTED);
+    LinearLayout result = Ui.column(this);
+    result.setGravity(Gravity.CENTER);
+    ImageView icon = new ImageView(this);
+    icon.setImageResource(R.drawable.myflat_export_done);
+    result.addView(icon, new LinearLayout.LayoutParams(Ui.dp(this, 126), Ui.dp(this, 126)));
+    result.addView(Ui.spacer(this, 24));
+    TextView location = Ui.text(this, "该文件存储在此处。", 16, Ui.MUTED);
     location.setGravity(Gravity.CENTER);
-    body.addView(location);
+    result.addView(location);
+    TextView filename =
+        Ui.text(
+            this,
+            Build.VERSION.SDK_INT >= 29 ? "Download/MyFlat/" + output.getName() : output.getName(),
+            16,
+            Ui.GREEN);
+    AppAppearance.keepText(filename);
+    filename.setGravity(Gravity.CENTER);
+    filename.setOnClickListener(v -> openFile());
+    result.addView(filename);
+    body.addView(result, new LinearLayout.LayoutParams(-1, 0, 1));
     root.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
     LinearLayout shareArea = Ui.column(this);
-    Ui.padding(shareArea, 24, 16);
-    shareArea.setBackground(Ui.shape(Ui.PAPER, Ui.dp(this, 16)));
+    Ui.padding(shareArea, 16, 16);
+    shareArea.setBackground(Ui.shape(0xfff5f5f5, Ui.dp(this, 16)));
     shareArea.addView(Ui.bold(this, "分享", 16));
-    shareArea.addView(Ui.spacer(this, 12));
-    shareArea.addView(Ui.primary(this, "分享文件", this::share));
-    if (Build.VERSION.SDK_INT < 29)
-      shareArea.addView(
-          Ui.pill(
-              this,
-              "保存到文件",
-              false,
-              () ->
-                  startActivityForResult(
-                      new Intent(Intent.ACTION_CREATE_DOCUMENT)
-                          .setType(mime())
-                          .addCategory(Intent.CATEGORY_OPENABLE)
-                          .putExtra(Intent.EXTRA_TITLE, output.getName()),
-                      1)));
-    root.addView(shareArea);
+    shareArea.addView(Ui.spacer(this, 8));
+    shareArea.addView(Ui.text(this, "请在符合版权的范围内使用它。", 14, Ui.MUTED));
+    LinearLayout targets = Ui.row(this);
+    Intent intent = shareIntent();
+    List<android.content.pm.ResolveInfo> handlers =
+        getPackageManager().queryIntentActivities(intent, 0);
+    handlers.removeIf(handler -> getPackageName().equals(handler.activityInfo.packageName));
+    for (int i = 0; i < 3; i++) {
+      if (i >= handlers.size()) {
+        targets.addView(new Space(this), new LinearLayout.LayoutParams(0, 1, 1));
+        continue;
+      }
+      android.content.pm.ResolveInfo handler = handlers.get(i);
+      LinearLayout target = Ui.column(this);
+      target.setGravity(Gravity.CENTER);
+      Ui.padding(target, 8, 8);
+      ImageView image = new ImageView(this);
+      image.setImageDrawable(handler.loadIcon(getPackageManager()));
+      target.addView(image, new LinearLayout.LayoutParams(Ui.dp(this, 48), Ui.dp(this, 48)));
+      target.addView(Ui.spacer(this, 8));
+      TextView name = Ui.text(this, handler.loadLabel(getPackageManager()).toString(), 12, Ui.INK);
+      AppAppearance.keepText(name);
+      name.setGravity(Gravity.CENTER | Gravity.TOP);
+      name.setMaxLines(2);
+      name.setMinLines(2);
+      target.addView(name);
+      target.setOnClickListener(
+          v -> {
+            try {
+              startActivity(
+                  shareIntent()
+                      .setComponent(
+                          new ComponentName(
+                              handler.activityInfo.packageName, handler.activityInfo.name)));
+            } catch (ActivityNotFoundException ex) {
+              Ui.error(this, ex);
+            }
+          });
+      targets.addView(target, new LinearLayout.LayoutParams(0, -2, 1));
+    }
+    targets.addView(
+        Ui.action(this, "more", "更多", this::share),
+        new LinearLayout.LayoutParams(0, Ui.dp(this, 104), 1));
+    shareArea.addView(targets);
+    LinearLayout.LayoutParams shareParams = new LinearLayout.LayoutParams(-1, -2);
+    shareParams.setMargins(Ui.dp(this, 16), 0, Ui.dp(this, 16), Ui.dp(this, 16));
+    root.addView(shareArea, shareParams);
     LinearLayout footer = Ui.row(this);
-    Ui.padding(footer, 16, 16);
-    footer.addView(
-        Ui.pill(this, "完成", false, this::finish),
-        new LinearLayout.LayoutParams(0, Ui.dp(this, 56), 1));
+    Ui.padding(footer, 16, 8);
+    TextView done = pdfButton("完成", false, this::finish);
+    done.setBackground(Ui.shape(0xfff5f5f5, Ui.dp(this, 8)));
+    footer.addView(done, new LinearLayout.LayoutParams(0, Ui.dp(this, 52), 1));
     footer.addView(new Space(this), new LinearLayout.LayoutParams(Ui.dp(this, 8), 1));
     footer.addView(
-        Ui.primary(this, "打开文件", this::openFile),
-        new LinearLayout.LayoutParams(0, Ui.dp(this, 56), 1));
+        pdfButton("打开文件", true, this::openFile),
+        new LinearLayout.LayoutParams(0, Ui.dp(this, 52), 1));
     root.addView(footer);
   }
 
-  private void share() {
+  private Intent shareIntent() {
     Uri uri = ShareProvider.uri(this, output);
     Intent intent =
         new Intent(Intent.ACTION_SEND)
@@ -734,7 +774,15 @@ public final class ExportActivity extends Activity {
             .putExtra(Intent.EXTRA_STREAM, uri)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
     intent.setClipData(ClipData.newRawUri("MyFlat", uri));
-    startActivity(Intent.createChooser(intent, "分享"));
+    return intent;
+  }
+
+  private void share() {
+    try {
+      startActivity(Intent.createChooser(shareIntent(), "分享"));
+    } catch (ActivityNotFoundException ex) {
+      Ui.error(this, ex);
+    }
   }
 
   private void openFile() {
@@ -768,5 +816,17 @@ public final class ExportActivity extends Activity {
   @Override
   public void onBackPressed() {
     if (!busy) super.onBackPressed();
+    else
+      Ui.alert(this)
+          .setMessage("退出后将取消创建文件。")
+          .setNegativeButton("继续", null)
+          .setPositiveButton(
+              "退出",
+              (d, w) -> {
+                if (exportTask != null) exportTask.cancel(true);
+                busy = false;
+                finish();
+              })
+          .show();
   }
 }

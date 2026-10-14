@@ -9,7 +9,7 @@ public final class ScanSettings {
   public boolean dewarp = true,
       enhance = true,
       fingers = true,
-      straighten = false,
+      straighten = true,
       handwriting = false;
   public boolean doublePage = false, rightFirst = false;
   public float split = .5f;
@@ -61,12 +61,12 @@ public final class ScanSettings {
       s.dewarp = j.optBoolean("dewarp", true);
       s.enhance = j.optBoolean("enhance", true);
       s.fingers = j.optBoolean("fingers", true);
-      s.straighten = j.optBoolean("straighten");
+      s.straighten = j.optBoolean("straighten", true);
       s.handwriting = j.optBoolean("handwriting");
       s.doublePage = j.optBoolean("doublePage");
       s.rightFirst = j.optBoolean("rightFirst");
       s.split = (float) Math.max(.3, Math.min(.7, j.optDouble("split", .5)));
-      s.quality = Math.max(60, Math.min(100, j.optInt("quality", 100)));
+      s.quality = 100;
       // Full resolution is the default, including preferences saved by earlier app versions.
       s.maxEdge = 0;
       s.sourceLeft = (float) Math.max(0, Math.min(.99, j.optDouble("sourceLeft", 0)));
@@ -85,13 +85,26 @@ public final class ScanSettings {
   }
 
   public static ScanSettings defaults(Context c) {
-    return parse(c.getSharedPreferences("settings", Context.MODE_PRIVATE).getString("scan", "{}"));
+    android.content.SharedPreferences preferences =
+        c.getSharedPreferences("settings", Context.MODE_PRIVATE);
+    ScanSettings settings = parse(preferences.getString("scan", "{}"));
+    // Apply the new default once; subsequent explicit choices must remain intact.
+    if (!preferences.getBoolean("straighten_default_enabled", false)) {
+      settings.straighten = true;
+      preferences
+          .edit()
+          .putString("scan", settings.json())
+          .putBoolean("straighten_default_enabled", true)
+          .apply();
+    }
+    return settings;
   }
 
   public void save(Context c) {
     c.getSharedPreferences("settings", Context.MODE_PRIVATE)
         .edit()
         .putString("scan", json())
+        .putBoolean("straighten_default_enabled", true)
         .apply();
   }
 }

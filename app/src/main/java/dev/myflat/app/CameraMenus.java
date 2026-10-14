@@ -19,11 +19,12 @@ final class CameraMenus {
       boolean sound,
       Consumer<Boolean> soundChanged,
       Runnable settings,
+      Runnable resolution,
       Runnable support,
       Runnable importer,
       Runnable optionsChanged) {
     LinearLayout card = Ui.column(activity);
-    card.setBackground(Ui.shape(0xee191b1a, Ui.dp(activity, 20)));
+    card.setBackground(Ui.shape(0xe0000000, Ui.dp(activity, 20)));
     Ui.padding(card, 16, 8);
     Dialog dialog = dialog(activity, card);
     LinearLayout header = Ui.row(activity);
@@ -56,6 +57,23 @@ final class CameraMenus {
             }),
         new LinearLayout.LayoutParams(0, Ui.dp(activity, 104), 1));
     card.addView(header);
+    card.addView(divider(activity, 0xff343635));
+    LinearLayout resolutionRow = Ui.row(activity);
+    Ui.padding(resolutionRow, 8, 12);
+    resolutionRow.addView(
+        Ui.text(activity, "扫描分辨率", 16, Color.WHITE), new LinearLayout.LayoutParams(0, -2, 1));
+    android.content.SharedPreferences preferences = PhotoResolution.preferences(activity);
+    int width = preferences.getInt("active_jpeg_width", 0),
+        height = preferences.getInt("active_jpeg_height", 0);
+    resolutionRow.addView(
+        Ui.text(activity, width > 0 ? width + " × " + height + "  ›" : "›", 14, 0xffaaaaaa));
+    resolutionRow.setContentDescription("扫描分辨率");
+    resolutionRow.setOnClickListener(
+        v -> {
+          dialog.dismiss();
+          resolution.run();
+        });
+    card.addView(resolutionRow);
     card.addView(divider(activity, 0xff343635));
     toggle(
         activity,
@@ -122,6 +140,100 @@ final class CameraMenus {
           flags.y = Ui.dp(activity, 40);
           flags.dimAmount = 0;
           w.setAttributes(flags);
+        });
+    return dialog;
+  }
+
+  static Dialog scanModes(Activity activity, int selected, java.util.function.IntConsumer choose) {
+    LinearLayout card = Ui.column(activity);
+    card.setBackground(Ui.shape(0xe0000000, Ui.dp(activity, 16)));
+    card.setClipToOutline(true);
+    Dialog dialog = dialog(activity, card);
+    int[] icons = {
+      R.drawable.myflat_ic_camera_mode_one,
+      R.drawable.myflat_ic_camera_mode_two,
+      R.drawable.myflat_ic_camera_mode_auto
+    };
+    String[] labels = {"1页", "2页", "自动检测"};
+    for (int i = 0; i < labels.length; i++) {
+      final int mode = i;
+      LinearLayout row = Ui.row(activity);
+      Ui.padding(row, 16, 0);
+      row.addView(
+          icon(activity, icons[i], Color.WHITE),
+          new LinearLayout.LayoutParams(Ui.dp(activity, 24), Ui.dp(activity, 24)));
+      TextView title = Ui.text(activity, labels[i], 17, Color.WHITE);
+      LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, -2, 1);
+      titleParams.leftMargin = Ui.dp(activity, 16);
+      row.addView(title, titleParams);
+      row.setContentDescription(labels[i] + (selected == i ? "，已选中" : ""));
+      row.setOnClickListener(
+          v -> {
+            choose.accept(mode);
+            dialog.dismiss();
+          });
+      card.addView(row, new LinearLayout.LayoutParams(-1, Ui.dp(activity, 56)));
+      if (i != labels.length - 1) card.addView(divider(activity, 0x1affffff));
+    }
+    dialog.setOnShowListener(
+        d -> {
+          Window window = dialog.getWindow();
+          window.setLayout(Ui.dp(activity, 180), -2);
+          window.setGravity(Gravity.LEFT | Gravity.TOP);
+          WindowManager.LayoutParams flags = window.getAttributes();
+          flags.x = Ui.dp(activity, 8);
+          flags.y =
+              Math.max(
+                  Ui.dp(activity, 40),
+                  Math.round(activity.getResources().getDisplayMetrics().widthPixels * 4f / 3)
+                      - Ui.dp(activity, 176));
+          flags.dimAmount = 0;
+          window.setAttributes(flags);
+        });
+    return dialog;
+  }
+
+  static Dialog qr(Activity activity, String title, String description, Runnable open) {
+    LinearLayout card = Ui.row(activity);
+    card.setBackground(Ui.shape(Color.WHITE, Ui.dp(activity, 12)));
+    Ui.padding(card, 16, 12);
+    Dialog dialog = dialog(activity, card);
+    LinearLayout words = Ui.column(activity);
+    TextView label = Ui.text(activity, title, 17, 0xff303030);
+    label.setSingleLine(true);
+    words.addView(label);
+    TextView summary = Ui.text(activity, description, 17, 0xff303030);
+    summary.setSingleLine(true);
+    summary.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+    words.addView(summary);
+    LinearLayout.LayoutParams wordsParams = new LinearLayout.LayoutParams(0, -2, 1);
+    wordsParams.rightMargin = Ui.dp(activity, 24);
+    card.addView(words, wordsParams);
+    TextView action = Ui.text(activity, "→", 24, Color.BLACK);
+    action.setGravity(Gravity.CENTER);
+    action.setBackground(Ui.shape(0xfffdd835, Ui.dp(activity, 12)));
+    action.setContentDescription(description);
+    action.setOnClickListener(
+        v -> {
+          dialog.dismiss();
+          open.run();
+        });
+    card.addView(action, new LinearLayout.LayoutParams(Ui.dp(activity, 48), Ui.dp(activity, 48)));
+    dialog.setOnShowListener(
+        d -> {
+          Window window = dialog.getWindow();
+          window.setLayout(
+              activity.getResources().getDisplayMetrics().widthPixels - Ui.dp(activity, 32), -2);
+          window.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+          WindowManager.LayoutParams flags = window.getAttributes();
+          flags.y =
+              Math.max(
+                  Ui.dp(activity, 80),
+                  activity.getResources().getDisplayMetrics().heightPixels
+                      - Math.round(activity.getResources().getDisplayMetrics().widthPixels * 4f / 3)
+                      + Ui.dp(activity, 16));
+          flags.dimAmount = 0;
+          window.setAttributes(flags);
         });
     return dialog;
   }
@@ -226,7 +338,7 @@ final class CameraMenus {
     ImageView image = icon(activity, resource, Color.WHITE);
     box.addView(image, new LinearLayout.LayoutParams(Ui.dp(activity, 24), Ui.dp(activity, 24)));
     box.addView(Ui.spacer(activity, 10));
-    TextView label = Ui.text(activity, text, 18, Color.WHITE);
+    TextView label = Ui.text(activity, text, 17, Color.WHITE);
     label.setGravity(Gravity.CENTER);
     box.addView(label);
     box.setContentDescription(text.replace('\n', ' '));
@@ -257,7 +369,7 @@ final class CameraMenus {
     LinearLayout row = Ui.row(activity);
     Ui.padding(row, 10, 12);
     LinearLayout words = Ui.column(activity);
-    words.addView(Ui.text(activity, title, 18, Color.WHITE));
+    words.addView(Ui.text(activity, title, 17, Color.WHITE));
     TextView description = Ui.text(activity, summary, 14, 0xffaaaaaa);
     Ui.padding(description, 0, 4);
     words.addView(description);

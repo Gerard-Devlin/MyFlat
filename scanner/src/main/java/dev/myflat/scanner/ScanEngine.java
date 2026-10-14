@@ -380,6 +380,21 @@ public final class ScanEngine {
     return remap(source, grid, 320, 320, source.getWidth(), source.getHeight());
   }
 
+  /** Paper-color field for local cleanup; the source is never changed. */
+  public Bitmap paperBackground(Bitmap source) throws IOException {
+    checkCancelled();
+    float[] background = runner.run("enhance_v10", ImageMath.input(source, 320, 320, false));
+    int[] pixels = new int[320 * 320];
+    for (int i = 0; i < pixels.length; i++)
+      pixels[i] = ImageMath.rgb(background[i * 4], background[i * 4 + 1], background[i * 4 + 2]);
+    return ImageMath.bitmap(pixels, 320, 320);
+  }
+
+  /** Removes handwriting from the current full-resolution page, without rerunning its crop. */
+  public Bitmap removeHandwriting(Bitmap source, Progress progress) throws IOException {
+    return handwriting(source, progress);
+  }
+
   private Bitmap enhance(Bitmap source) throws IOException {
     float[] in = ImageMath.input(source, 320, 320, false), dist = runner.run("enhance_v10", in);
     boolean useBlack = runner.run("blackpoint_classification_v1_0_1", in)[0] < 0;

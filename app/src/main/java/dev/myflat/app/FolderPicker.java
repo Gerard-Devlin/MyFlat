@@ -15,12 +15,15 @@ final class FolderPicker {
     Dialog dialog = new Dialog(a, android.R.style.Theme_Material_Light_NoActionBar);
     long[] selected = {initial};
     LinearLayout root = Ui.column(a);
-    root.setBackgroundColor(Color.WHITE);
+    root.setBackgroundColor(0xfff5f5f5);
     LinearLayout head = Ui.row(a);
-    head.addView(Ui.iconButton(a, "back", "取消", dialog::dismiss));
-    TextView title = Ui.bold(a, "请选择文件夹", 20);
+    head.addView(Ui.iconButton(a, "close", "取消", dialog::dismiss));
+    TextView title = Ui.text(a, "请选择一个文件夹", 20, Ui.INK);
+    head.setBackgroundColor(Color.WHITE);
     title.setGravity(Gravity.CENTER_VERTICAL);
-    head.addView(title, new LinearLayout.LayoutParams(0, Ui.dp(a, 56), 1));
+    LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(0, Ui.dp(a, 56), 1);
+    hp.leftMargin = Ui.dp(a, 16);
+    head.addView(title, hp);
     LinearLayout content = Ui.column(a);
     TextView save =
         Ui.primary(
@@ -36,7 +39,7 @@ final class FolderPicker {
     render[0] =
         () -> {
           content.removeAllViews();
-          Ui.padding(content, 8, 12);
+          Ui.padding(content, 8, 8);
           java.util.List<DocumentStore.Folder> folders = MyFlatApp.of(a).store.folders();
           LinearLayout row = null;
           for (int i = 0; i < folders.size(); i++) {
@@ -47,16 +50,24 @@ final class FolderPicker {
             }
             DocumentStore.Folder f = folders.get(i);
             LinearLayout cell = Ui.column(a);
-            Ui.padding(cell, 4, 8);
+            cell.setPadding(Ui.dp(a, 4), Ui.dp(a, 4), Ui.dp(a, 4), Ui.dp(a, 16));
             FrameLayout cover = new FrameLayout(a);
-            cover.setBackground(Ui.shape(0xfff5f5f5, Ui.dp(a, 4)));
+            android.graphics.drawable.GradientDrawable border = Ui.shape(0xfff5f5f5, Ui.dp(a, 8));
+            border.setStroke(Ui.dp(a, 1), 0xffeeeeee);
+            cover.setBackground(border);
+            boolean locked = FolderSecurity.locked(a, f.id);
             java.util.List<DocumentStore.Document> docs =
-                MyFlatApp.of(a).store.documents(f.id, "", false);
+                locked ? Collections.emptyList() : MyFlatApp.of(a).store.documents(f.id, "", false);
             String file = null;
             int count = 0;
             for (DocumentStore.Document d : docs) {
               if (file == null) file = d.cover;
               count += d.count;
+            }
+            if (!locked && f.cover != null && !f.cover.isEmpty()) {
+              DocumentStore.Page custom = MyFlatApp.of(a).store.page(f.cover);
+              if (custom != null && custom.deleted == 0)
+                file = "ready".equals(custom.status) ? custom.result : custom.original;
             }
             if (file != null) {
               ImageView image = new ImageView(a);
@@ -67,40 +78,54 @@ final class FolderPicker {
                 Ui.thumbnail(image, MyFlatApp.of(a).store.file(file));
               } catch (Exception ignored) {
               }
+            } else {
+              Ui.Icon empty = new Ui.Icon(a, "empty_folder");
+              empty.color = 0xffe1e1e1;
+              cover.addView(
+                  empty, new FrameLayout.LayoutParams(Ui.dp(a, 40), Ui.dp(a, 40), Gravity.CENTER));
             }
             TextView check = Ui.text(a, selected[0] == f.id ? "✓" : "", 18, Color.WHITE);
             android.graphics.drawable.GradientDrawable ring =
                 Ui.shape(selected[0] == f.id ? Ui.GREEN : Color.TRANSPARENT, Ui.dp(a, 12));
-            ring.setStroke(Ui.dp(a, 1), selected[0] == f.id ? Ui.GREEN : 0xffbbbbbb);
+            ring.setStroke(Ui.dp(a, 2), selected[0] == f.id ? Ui.GREEN : 0xffbdbdbd);
             check.setBackground(ring);
             check.setGravity(Gravity.CENTER);
             FrameLayout.LayoutParams cp =
                 new FrameLayout.LayoutParams(Ui.dp(a, 24), Ui.dp(a, 24), Gravity.TOP | Gravity.END);
-            cp.setMargins(0, Ui.dp(a, 8), Ui.dp(a, 8), 0);
+            cp.setMargins(0, Ui.dp(a, 12), Ui.dp(a, 12), 0);
             cover.addView(check, cp);
-            int width = (a.getResources().getDisplayMetrics().widthPixels - Ui.dp(a, 40)) / 3;
+            int width =
+                (a.getResources().getDisplayMetrics().widthPixels - Ui.dp(a, 16)) / 3 - Ui.dp(a, 8);
             cell.addView(cover, new LinearLayout.LayoutParams(-1, Math.round(width * 1.4142f)));
             TextView name = Ui.bold(a, f.name, 14);
+            AppAppearance.keepText(name);
             Ui.padding(name, 0, 8);
             cell.addView(name);
             LinearLayout detail = Ui.row(a);
             Ui.Icon pageIcon = new Ui.Icon(a, "page_count");
             detail.addView(pageIcon, new LinearLayout.LayoutParams(Ui.dp(a, 16), Ui.dp(a, 16)));
-            detail.addView(Ui.text(a, " " + count, 12, Ui.MUTED));
+            detail.addView(Ui.text(a, locked ? "" : " " + count, 12, Ui.MUTED));
             cell.addView(detail);
             cell.setContentDescription(f.name + (selected[0] == f.id ? "，已选中" : ""));
             cell.setOnClickListener(
                 v -> {
-                  selected[0] = f.id;
-                  render[0].run();
+                  FolderSecurity.require(
+                      a,
+                      f.id,
+                      () -> {
+                        selected[0] = f.id;
+                        render[0].run();
+                      },
+                      () -> {});
                 });
             row.addView(cell, new LinearLayout.LayoutParams(0, -2, 1));
           }
           if (row != null)
             for (int i = folders.size() % 3; i > 0 && i < 3; i++)
               row.addView(new Space(a), new LinearLayout.LayoutParams(0, 1, 1));
-          save.setAlpha(selected[0] > 0 ? 1 : .35f);
+          save.setAlpha(1);
           save.setEnabled(selected[0] > 0);
+          save.setBackground(Ui.shape(selected[0] > 0 ? Ui.GREEN : 0xffe0e0e0, Ui.dp(a, 8)));
         };
     head.addView(
         Ui.iconButton(
@@ -108,12 +133,10 @@ final class FolderPicker {
             "folder_add",
             "新建文件夹",
             () ->
-                Ui.rename(
+                LibraryInputDialog.createFolder(
                     a,
-                    "新建文件夹",
-                    "",
-                    name -> {
-                      selected[0] = MyFlatApp.of(a).store.createFolder(name);
+                    id -> {
+                      selected[0] = id;
                       render[0].run();
                     })));
     root.addView(head);
@@ -122,8 +145,11 @@ final class FolderPicker {
     scroll.addView(content);
     root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
     LinearLayout footer = Ui.column(a);
-    Ui.padding(footer, 16, 8);
-    footer.addView(save, new LinearLayout.LayoutParams(-1, Ui.dp(a, 48)));
+    Ui.padding(footer, 8, 8);
+    footer.setBackgroundColor(Color.WHITE);
+    save.setTextSize(14);
+    save.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+    footer.addView(save, new LinearLayout.LayoutParams(-1, Ui.dp(a, 52)));
     root.addView(footer);
     render[0].run();
     Ui.dialogInsets(dialog, root);

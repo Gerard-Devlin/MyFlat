@@ -18,7 +18,10 @@ public final class ImportActivity extends Activity {
   private final HashMap<String, Integer> rotations = new HashMap<>();
   private ScanSettings options;
   private int index;
-  private ImageView image;
+  private ImageView image, previousImage, nextImage;
+  private FrameLayout screen;
+  private View progressOverlay;
+  private ProgressBar importProgress;
   private TextView position;
   private LinearLayout effects;
   private Future<?> preview;
@@ -28,6 +31,7 @@ public final class ImportActivity extends Activity {
 
   @Override
   public void onCreate(Bundle state) {
+    AppAppearance.prepare(this);
     super.onCreate(state);
     if (state != null) {
       for (String value : state.getStringArrayList("uris")) uris.add(Uri.parse(value));
@@ -41,6 +45,11 @@ public final class ImportActivity extends Activity {
               getSharedPreferences("settings", 0).getString("import", "{\"dewarp\":false}"));
       options.doublePage = false;
     }
+    if (uris.isEmpty()) {
+      finish();
+      return;
+    }
+    index = Math.max(0, Math.min(uris.size() - 1, index));
     build();
   }
 
@@ -71,14 +80,20 @@ public final class ImportActivity extends Activity {
     header.addView(done, new LinearLayout.LayoutParams(Ui.dp(this, 80), Ui.dp(this, 56)));
     done.setOnClickListener(v -> chooseDestination());
     root.addView(header);
-    root.addView(Ui.line(this));
+    header.setElevation(Ui.dp(this, 1));
     FrameLayout previewArea = new FrameLayout(this);
-    previewArea.setBackgroundColor(0xffeeeeee);
+    previewArea.setBackgroundColor(0xfffafafa);
     image = new ImageView(this);
     image.setScaleType(ImageView.ScaleType.FIT_CENTER);
-    FrameLayout.LayoutParams ip = new FrameLayout.LayoutParams(-1, -1);
-    ip.setMargins(Ui.dp(this, 24), Ui.dp(this, 40), Ui.dp(this, 24), Ui.dp(this, 56));
+    int pageWidth =
+        Math.max(
+            1, Math.round(getResources().getDisplayMetrics().widthPixels * .9f) - Ui.dp(this, 40));
+    FrameLayout.LayoutParams ip =
+        new FrameLayout.LayoutParams(pageWidth, -1, Gravity.CENTER_HORIZONTAL);
+    ip.setMargins(0, Ui.dp(this, 40), 0, Ui.dp(this, 56));
     previewArea.addView(image, ip);
+    previousImage = adjacentImage(previewArea, pageWidth, -1);
+    nextImage = adjacentImage(previewArea, pageWidth, 1);
     image.setOnTouchListener(
         (v, e) -> {
           if (e.getAction() == MotionEvent.ACTION_DOWN) {
@@ -96,11 +111,11 @@ public final class ImportActivity extends Activity {
           }
           return true;
         });
-    position = Ui.bold(this, "", 12);
+    position = Ui.bold(this, "", 14);
     position.setTextColor(Color.WHITE);
     position.setGravity(Gravity.CENTER);
     Ui.padding(position, 16, 4);
-    position.setBackground(Ui.shape(0xaa000000, Ui.dp(this, 16)));
+    position.setBackground(Ui.shape(0x8045484b, Ui.dp(this, 16)));
     FrameLayout.LayoutParams pp =
         new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
     pp.bottomMargin = Ui.dp(this, 72);
@@ -123,22 +138,64 @@ public final class ImportActivity extends Activity {
     previewArea.addView(buttons, bp);
     root.addView(previewArea, new LinearLayout.LayoutParams(-1, 0, 1));
     effects = Ui.column(this);
-    effects.setBackground(Ui.shape(Color.WHITE, Ui.dp(this, 16)));
-    Ui.padding(effects, 24, 20);
+    android.graphics.drawable.GradientDrawable effectBg = Ui.shape(Color.WHITE, 0);
+    float effectRadius = Ui.dp(this, 16);
+    effectBg.setCornerRadii(
+        new float[] {effectRadius, effectRadius, effectRadius, effectRadius, 0, 0, 0, 0});
+    effects.setBackground(effectBg);
+    effects.setElevation(Ui.dp(this, 2));
+    effects.setPadding(Ui.dp(this, 24), Ui.dp(this, 20), Ui.dp(this, 24), Ui.dp(this, 32));
     root.addView(effects);
     renderEffects();
+    screen = new FrameLayout(this);
+    root.removeAllViews();
+    LinearLayout body = Ui.column(this);
+    body.addView(header);
+    body.addView(previewArea, new LinearLayout.LayoutParams(-1, 0, 1));
+    body.addView(effects);
+    screen.addView(body, new FrameLayout.LayoutParams(-1, -1));
+    FrameLayout overlay = new FrameLayout(this);
+    overlay.setBackgroundColor(Color.WHITE);
+    overlay.setClickable(true);
+    importProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+    importProgress.setProgressTintList(android.content.res.ColorStateList.valueOf(Ui.GREEN));
+    importProgress.setMax(100);
+    FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER);
+    progressParams.leftMargin = progressParams.rightMargin = Ui.dp(this, 64);
+    overlay.addView(importProgress, progressParams);
+    overlay.setVisibility(View.GONE);
+    progressOverlay = overlay;
+    screen.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+    root.addView(screen, new LinearLayout.LayoutParams(-1, -1));
     loadPreview();
+  }
+
+  private ImageView adjacentImage(FrameLayout parent, int width, int side) {
+    ImageView adjacent = new ImageView(this);
+    adjacent.setScaleType(ImageView.ScaleType.FIT_CENTER);
+    adjacent.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+    FrameLayout.LayoutParams lp =
+        new FrameLayout.LayoutParams(width, -1, Gravity.CENTER_HORIZONTAL);
+    lp.setMargins(0, Ui.dp(this, 40), 0, Ui.dp(this, 56));
+    parent.addView(adjacent, lp);
+    adjacent.setTranslationX(side * (width + Ui.dp(this, 20)));
+    return adjacent;
   }
 
   private View option(String icon, String label, Runnable action) {
     LinearLayout b = Ui.row(this);
     b.setGravity(Gravity.CENTER);
-    Ui.padding(b, 12, 4);
-    b.setBackground(Ui.shape(Color.WHITE, Ui.dp(this, 20)));
+    b.setPadding(Ui.dp(this, 14), Ui.dp(this, 6), Ui.dp(this, 22), Ui.dp(this, 6));
+    android.graphics.drawable.GradientDrawable buttonBg = Ui.shape(Color.WHITE, Ui.dp(this, 16));
+    buttonBg.setStroke(Ui.dp(this, 1), 0x80e4e5e6);
+    b.setBackground(buttonBg);
     b.setElevation(Ui.dp(this, 1));
     b.addView(
         new Ui.Icon(this, icon), new LinearLayout.LayoutParams(Ui.dp(this, 20), Ui.dp(this, 20)));
-    b.addView(Ui.text(this, "  " + label, 14, Ui.INK));
+    TextView labelView = Ui.text(this, label, 14, 0xff212121);
+    LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(-2, -2);
+    labelParams.leftMargin = Ui.dp(this, 4);
+    b.addView(labelView, labelParams);
     b.setOnClickListener(v -> action.run());
     return b;
   }
@@ -146,6 +203,7 @@ public final class ImportActivity extends Activity {
   private void renderEffects() {
     effects.removeAllViews();
     TextView heading = Ui.bold(this, "要应用的效果", 16);
+    heading.setPadding(0, 0, 0, Ui.dp(this, 4));
     effects.addView(heading);
     effects.addView(Ui.spacer(this, 10));
     effect(
@@ -197,7 +255,11 @@ public final class ImportActivity extends Activity {
     row.setEnabled(enabled);
     row.setContentDescription(text + (checked && enabled ? "，已选中" : ""));
     row.setOnClickListener(v -> action.run());
-    effects.addView(row, new LinearLayout.LayoutParams(-1, Ui.dp(this, 44)));
+    title.setPadding(0, Ui.dp(this, 10), 0, Ui.dp(this, 10));
+    LinearLayout.LayoutParams effectParams = new LinearLayout.LayoutParams(-1, -2);
+    effectParams.bottomMargin = Ui.dp(this, 4);
+    if (effects.getChildCount() > 2) effectParams.topMargin = Ui.dp(this, 4);
+    effects.addView(row, effectParams);
   }
 
   private void loadPreview() {
@@ -206,6 +268,10 @@ public final class ImportActivity extends Activity {
     Uri uri = uris.get(index);
     position.setText((index + 1) + " / " + uris.size());
     image.setImageDrawable(null);
+    previousImage.setVisibility(index > 0 ? View.VISIBLE : View.INVISIBLE);
+    nextImage.setVisibility(index + 1 < uris.size() ? View.VISIBLE : View.INVISIBLE);
+    if (index > 0) Ui.thumbnail(previousImage, uris.get(index - 1));
+    if (index + 1 < uris.size()) Ui.thumbnail(nextImage, uris.get(index + 1));
     preview =
         MyFlatApp.of(this)
             .io
@@ -269,6 +335,13 @@ public final class ImportActivity extends Activity {
   }
 
   private void importFiles(long folder, String document) {
+    if (document != null)
+      FolderSecurity.requireDocument(
+          this, document, () -> importFilesAllowed(folder, document), () -> {});
+    else FolderSecurity.require(this, folder, () -> importFilesAllowed(folder, null), () -> {});
+  }
+
+  private void importFilesAllowed(long folder, String document) {
     working = true;
     getSharedPreferences("settings", 0).edit().putString("import", options.json()).apply();
     if (document == null)
@@ -287,10 +360,9 @@ public final class ImportActivity extends Activity {
       actual.fingers = false;
       actual.straighten = false;
     }
-    ProgressDialog progress = new ProgressDialog(this);
-    progress.setMessage("正在导入…");
-    progress.setCancelable(false);
-    progress.show();
+    progressOverlay.setVisibility(View.VISIBLE);
+    progressOverlay.setContentDescription("正在导入");
+    importProgress.setIndeterminate(true);
     MyFlatApp.of(this)
         .io
         .submit(
@@ -303,10 +375,11 @@ public final class ImportActivity extends Activity {
                         uris,
                         actual,
                         rotations,
-                        message -> runOnUiThread(() -> progress.setMessage(message)));
+                        message ->
+                            runOnUiThread(() -> progressOverlay.setContentDescription(message)));
                 runOnUiThread(
                     () -> {
-                      progress.dismiss();
+                      progressOverlay.setVisibility(View.GONE);
                       setResult(
                           RESULT_OK,
                           new Intent().putExtra("folder", folder).putExtra("document", target));
@@ -316,7 +389,7 @@ public final class ImportActivity extends Activity {
                 runOnUiThread(
                     () -> {
                       working = false;
-                      progress.dismiss();
+                      progressOverlay.setVisibility(View.GONE);
                       Ui.error(this, ex);
                     });
               }

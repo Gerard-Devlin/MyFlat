@@ -73,6 +73,7 @@ final class ActionMenus {
           WindowManager.LayoutParams lp = w.getAttributes();
           lp.dimAmount = .6f;
           w.setAttributes(lp);
+          AppAppearance.dialog(dialog, card);
         });
     dialog.show();
   }

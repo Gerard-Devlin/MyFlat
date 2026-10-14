@@ -16,15 +16,23 @@ public final class SettingsActivity extends Activity {
   private LinearLayout list;
   private SharedPreferences prefs;
   private boolean busy;
+  private ScrollView settingsScroll;
+  private int scrollPosition;
+  private boolean includeLocked;
+  private Dialog transferDialog;
+  private LinearLayout transferBody;
 
   @Override
   public void onCreate(Bundle state) {
+    AppAppearance.prepare(this);
     super.onCreate(state);
     prefs = getSharedPreferences("preferences", 0);
     build();
+    if ("timer".equals(getIntent().getStringExtra("screen"))) timer();
   }
 
   private void build() {
+    if (settingsScroll != null) scrollPosition = settingsScroll.getScrollY();
     LinearLayout root = Ui.root(this);
     LinearLayout header = Ui.row(this);
     header.addView(Ui.iconButton(this, "back", "返回", this::finish));
@@ -35,12 +43,14 @@ public final class SettingsActivity extends Activity {
     title.setTypeface(android.graphics.Typeface.DEFAULT);
     header.addView(title, titleParams);
     root.addView(header);
-    root.addView(Ui.line(this));
     ScrollView scroll = new ScrollView(this);
+    settingsScroll = scroll;
+    scroll.setFillViewport(true);
     list = Ui.column(this);
     scroll.addView(list);
     root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
     category("实验性功能");
+    item("建议文本更改", "", () -> Support.translation(this));
     item(
         "分享这个应用程式",
         "",
@@ -68,55 +78,38 @@ public final class SettingsActivity extends Activity {
                   prefs.edit().putInt("direction", n).apply();
                   build();
                 }));
-    item("扫描分辨率", "高", this::resolution);
+    String resolutionValue;
+    try {
+      resolutionValue = PhotoResolution.discover(this).selected(this).label();
+    } catch (Exception ignored) {
+      resolutionValue = "";
+    }
+    item("扫描分辨率", resolutionValue, this::resolution);
     ScanSettings scan = ScanSettings.defaults(this);
-    item(
-        "两页扫描顺序",
-        scan.rightFirst ? "从右至左" : "从左至右",
-        () ->
-            choice(
-                "两页扫描顺序",
-                new String[] {"从左至右", "从右至左"},
-                scan.rightFirst ? 1 : 0,
-                n -> {
-                  ScanSettings s = ScanSettings.defaults(this);
-                  s.rightFirst = n == 1;
-                  s.save(this);
-                  build();
-                }));
-    item("自定义定时器", prefs.getInt("timer", 7) + "s", this::timer);
+    item("两页扫描顺序", scan.rightFirst ? "从右至左" : "从左至右", this::twoPagesOrder);
+    item("自定义定时器", timerLabel(customTimer()), this::timer);
     category("应用程序设置");
+    item("夜间模式", AppAppearance.nightLabel(this), this::nightMode);
+    item("语言", "", this::language);
     item("管理存储", "", this::storage);
+    item("文件夹安全", "", () -> FolderSecurity.settings(this));
     item(
-        "通知设置",
+        "通知",
         "",
         () ->
             startActivity(
                 new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                     .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName())));
     category("附加的功能");
-    item("备份与恢复", "", this::backup);
+    toggle("扫描二维码", "", "qr", true);
+    item("备份 / 恢复", "", this::backup);
     item("高级设置", "", this::advanced);
     category("联系我们");
     item("客户支持", "", () -> Support.show(this));
+    item("商务咨询", "", () -> Support.business(this));
     category("法律文件");
-    item(
-        "使用条款",
-        "",
-        () ->
-            textPage(
-                "使用条款",
-                "MyFlat is provided as is, without warranty. You are responsible for the documents"
-                    + " you scan and share."));
-    item(
-        "隐私政策",
-        "",
-        () ->
-            textPage(
-                "隐私政策",
-                "MyFlat processes documents on your device. Scans, source photos and document"
-                    + " metadata stay in app storage unless you export or share them. The app does"
-                    + " not upload documents or require an account."));
+    item("使用条款", "", () -> WelcomeActivity.policy(this, "使用条款", WelcomeActivity.TERMS));
+    item("隐私政策", "", () -> WelcomeActivity.policy(this, "隐私政策", WelcomeActivity.PRIVACY));
     item(
         "开放源代码许可",
         "",
@@ -141,35 +134,58 @@ public final class SettingsActivity extends Activity {
     }
     item("版本", version, () -> {});
     list.addView(Ui.spacer(this, 24));
+    scroll.post(() -> scroll.scrollTo(0, scrollPosition));
   }
 
   private void category(String title) {
     TextView label = Ui.bold(this, title, 14);
     label.setTextColor(0xff666666);
     Ui.padding(label, 16, 8);
-    LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, Ui.dp(this, 44));
+    LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
     p.topMargin = Ui.dp(this, 16);
     list.addView(label, p);
   }
 
   private LinearLayout item(String title, String value, Runnable click) {
+    return item(list, title, value, "", click);
+  }
+
+  private LinearLayout item(
+      LinearLayout target, String title, String value, String summary, Runnable click) {
     LinearLayout row = Ui.row(this);
-    Ui.padding(row, 16, 0);
+    Ui.padding(row, 16, 16);
     row.setMinimumHeight(Ui.dp(this, 56));
-    TextView text = Ui.text(this, title, 16, Ui.INK);
-    row.addView(text, new LinearLayout.LayoutParams(0, Ui.dp(this, 56), 1));
-    text.setGravity(Gravity.CENTER_VERTICAL);
-    TextView right = Ui.text(this, value.isEmpty() ? "›" : value, 14, 0xff666666);
-    row.addView(right);
+    LinearLayout labels = Ui.column(this);
+    labels.addView(Ui.text(this, title, 16, Ui.INK));
+    if (!summary.isEmpty()) labels.addView(Ui.text(this, summary, 14, 0xff666666));
+    row.addView(labels, new LinearLayout.LayoutParams(0, -2, 1));
+    if (value.isEmpty()) {
+      ImageView next = new ImageView(this);
+      next.setImageResource(R.drawable.myflat_settings_next);
+      LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(Ui.dp(this, 24), Ui.dp(this, 24));
+      p.leftMargin = Ui.dp(this, 16);
+      row.addView(next, p);
+    } else {
+      TextView right = Ui.text(this, value, 14, 0xff666666);
+      LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, -2);
+      p.leftMargin = Ui.dp(this, 16);
+      row.addView(right, p);
+    }
     row.setBackgroundResource(android.R.drawable.list_selector_background);
     row.setOnClickListener(v -> click.run());
-    list.addView(row);
+    target.addView(row);
     return row;
   }
 
   private void toggle(String title, String summary, String key, boolean initial) {
+    toggle(list, title, summary, key, initial);
+  }
+
+  private void toggle(
+      LinearLayout target, String title, String summary, String key, boolean initial) {
     LinearLayout row = Ui.row(this);
-    Ui.padding(row, 16, 12);
+    Ui.padding(row, 16, 16);
+    row.setMinimumHeight(Ui.dp(this, 56));
     LinearLayout labels = Ui.column(this);
     labels.addView(Ui.text(this, title, 16, Ui.INK));
     if (!summary.isEmpty()) labels.addView(Ui.text(this, summary, 14, 0xff666666));
@@ -177,6 +193,14 @@ public final class SettingsActivity extends Activity {
     Switch toggle = new Switch(this);
     toggle.setChecked(prefs.getBoolean(key, initial));
     toggle.setContentDescription(title);
+    toggle.setThumbTintList(
+        new android.content.res.ColorStateList(
+            new int[][] {new int[] {android.R.attr.state_checked}, new int[] {}},
+            new int[] {Ui.GREEN, 0xff9e9e9e}));
+    toggle.setTrackTintList(
+        new android.content.res.ColorStateList(
+            new int[][] {new int[] {android.R.attr.state_checked}, new int[] {}},
+            new int[] {0xffb2dfdb, 0xffe0e0e0}));
     toggle.setOnCheckedChangeListener(
         (b, value) -> {
           prefs.edit().putBoolean(key, value).apply();
@@ -188,134 +212,163 @@ public final class SettingsActivity extends Activity {
             requestPermissions(
                 new String[] {android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, 7);
         });
-    row.addView(toggle);
+    LinearLayout.LayoutParams widget = new LinearLayout.LayoutParams(-2, -2);
+    widget.leftMargin = Ui.dp(this, 16);
+    row.addView(toggle, widget);
     row.setOnClickListener(v -> toggle.setChecked(!toggle.isChecked()));
-    list.addView(row, new LinearLayout.LayoutParams(-1, Ui.dp(this, summary.isEmpty() ? 56 : 76)));
+    target.addView(row);
   }
 
   private interface Selected {
     void set(int at);
   }
 
-  private void choice(String title, String[] values, int selected, Selected chosen) {
+  private Dialog page(String title, LinearLayout body) {
     Dialog dialog = new Dialog(this, android.R.style.Theme_Material_Light_NoActionBar);
+    LinearLayout root = Ui.column(this);
+    root.setBackgroundColor(Color.WHITE);
+    LinearLayout header = Ui.row(this);
+    header.addView(
+        Ui.iconButton(
+            this,
+            "back",
+            "返回",
+            () -> {
+              if (!busy) dialog.dismiss();
+            }));
+    TextView label = Ui.text(this, title, 20, Ui.INK);
+    label.setGravity(Gravity.CENTER_VERTICAL);
+    LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, Ui.dp(this, 56), 1);
+    titleParams.leftMargin = Ui.dp(this, 16);
+    header.addView(label, titleParams);
+    root.addView(header);
+    ScrollView scroll = new ScrollView(this);
+    scroll.setFillViewport(true);
+    scroll.addView(body);
+    root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+    Ui.dialogInsets(dialog, root);
+    dialog.setOnDismissListener(d -> build());
+    dialog.show();
+    dialog.getWindow().setLayout(-1, -1);
+    return dialog;
+  }
+
+  private void choice(String title, String[] values, int selected, Selected chosen) {
+    choice(title, values, selected, chosen, null);
+  }
+
+  private void choice(String title, String[] values, int selected, Selected chosen, View guide) {
     LinearLayout body = Ui.column(this);
-    body.setBackgroundColor(Color.WHITE);
-    LinearLayout head = Ui.row(this);
-    head.addView(Ui.iconButton(this, "back", "返回", dialog::dismiss));
-    head.addView(Ui.bold(this, title, 20));
-    body.addView(head);
+    ImageView[] checks = new ImageView[values.length];
     for (int i = 0; i < values.length; i++) {
-      int at = i;
+      final int at = i;
       LinearLayout row = Ui.row(this);
-      Ui.padding(row, 16, 0);
-      row.addView(
-          Ui.text(this, values[i], 16, Ui.INK),
-          new LinearLayout.LayoutParams(0, Ui.dp(this, 64), 1));
-      RadioButton radio = new RadioButton(this);
-      radio.setChecked(selected == i);
-      radio.setClickable(false);
-      row.addView(radio);
+      Ui.padding(row, 16, 16);
+      row.setMinimumHeight(Ui.dp(this, 56));
+      row.addView(Ui.text(this, values[i], 16, Ui.INK), new LinearLayout.LayoutParams(0, -2, 1));
+      ImageView check = new ImageView(this);
+      check.setImageResource(R.drawable.myflat_ic_check);
+      check.setImageTintList(android.content.res.ColorStateList.valueOf(Ui.GREEN));
+      check.setVisibility(selected == i ? View.VISIBLE : View.INVISIBLE);
+      row.addView(check, new LinearLayout.LayoutParams(Ui.dp(this, 24), Ui.dp(this, 24)));
+      checks[i] = check;
+      row.setBackgroundResource(android.R.drawable.list_selector_background);
       row.setOnClickListener(
           v -> {
             chosen.set(at);
-            dialog.dismiss();
+            for (int j = 0; j < checks.length; j++)
+              checks[j].setVisibility(j == at ? View.VISIBLE : View.INVISIBLE);
           });
       body.addView(row);
     }
-    Ui.dialogInsets(dialog, body);
-    dialog.show();
-    dialog.getWindow().setLayout(-1, -1);
+    if (guide != null) body.addView(guide);
+    page(title, body);
+  }
+
+  private void nightMode() {
+    choice(
+        "夜间模式",
+        new String[] {"系统默认", "关闭", "开启"},
+        AppAppearance.nightMode(this),
+        at -> AppAppearance.setNightMode(this, at));
+  }
+
+  private void language() {
+    String[][] languages = AppAppearance.LANGUAGES;
+    String[] labels = new String[languages.length];
+    int selected = 0;
+    for (int i = 0; i < languages.length; i++) {
+      labels[i] = languages[i][1];
+      if (AppAppearance.language(this).equals(languages[i][0])) selected = i;
+    }
+    choice("语言", labels, selected, at -> AppAppearance.setLanguage(this, languages[at][0]));
+  }
+
+  private float customTimer() {
+    return prefs.getFloat("timer_seconds", prefs.getInt("timer", 7));
+  }
+
+  private static String timerLabel(float value) {
+    return (value == (int) value ? Integer.toString((int) value) : Float.toString(value)) + "s";
   }
 
   private void timer() {
-    EditText input = Ui.input(this, "" + prefs.getInt("timer", 7), "秒");
-    input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+    final float[] times = {1.5f, 2f, 2.5f, 3f, 4f, 5f, 6f, 7f, 10f, 15f, 20f};
     LinearLayout body = Ui.column(this);
-    Ui.padding(body, 24, 16);
-    body.addView(input);
-    new AlertDialog.Builder(this)
-        .setTitle("自定义定时器")
-        .setView(body)
-        .setNegativeButton("取消", null)
-        .setPositiveButton(
-            "确定",
-            (d, w) -> {
-              try {
-                int seconds = Integer.parseInt(input.getText().toString());
-                if (seconds < 1 || seconds > 60) throw new NumberFormatException();
-                prefs.edit().putInt("timer", seconds).apply();
-                build();
-              } catch (NumberFormatException ex) {
-                Toast.makeText(this, "请输入 1 到 60 秒", Toast.LENGTH_SHORT).show();
-              }
-            })
-        .show();
+    LinearLayout row = Ui.row(this);
+    Ui.padding(row, 16, 16);
+    ImageView icon = new ImageView(this);
+    icon.setImageResource(R.drawable.myflat_ic_camera_timer_off);
+    row.addView(icon, new LinearLayout.LayoutParams(Ui.dp(this, 24), Ui.dp(this, 24)));
+    SeekBar slider = new SeekBar(this);
+    slider.setMax(times.length - 1);
+    int initial = 0;
+    for (int i = 0; i < times.length; i++)
+      if (Math.abs(times[i] - customTimer()) < Math.abs(times[initial] - customTimer()))
+        initial = i;
+    slider.setProgress(initial);
+    slider.setProgressTintList(android.content.res.ColorStateList.valueOf(Ui.GREEN));
+    slider.setThumbTintList(android.content.res.ColorStateList.valueOf(Ui.GREEN));
+    LinearLayout.LayoutParams sliderParams = new LinearLayout.LayoutParams(0, -2, 1);
+    sliderParams.leftMargin = Ui.dp(this, 16);
+    row.addView(slider, sliderParams);
+    TextView seconds = Ui.text(this, timerLabel(times[initial]), 14, 0xff666666);
+    seconds.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+    seconds.setMinWidth(Ui.dp(this, 32));
+    LinearLayout.LayoutParams secondsParams = new LinearLayout.LayoutParams(-2, -2);
+    secondsParams.leftMargin = Ui.dp(this, 8);
+    row.addView(seconds, secondsParams);
+    slider.setOnSeekBarChangeListener(
+        new SeekBar.OnSeekBarChangeListener() {
+          public void onProgressChanged(SeekBar seek, int value, boolean fromUser) {
+            seconds.setText(timerLabel(times[value]));
+            if (fromUser)
+              prefs
+                  .edit()
+                  .putFloat("timer_seconds", times[value])
+                  .putInt("timer", Math.round(times[value]))
+                  .apply();
+          }
+
+          public void onStartTrackingTouch(SeekBar seek) {}
+
+          public void onStopTrackingTouch(SeekBar seek) {}
+        });
+    body.addView(row);
+    page("自定义定时器", body);
   }
 
   private void resolution() {
-    String message = "使用相机提供的最高分辨率。";
     try {
-      android.hardware.camera2.CameraManager manager =
-          getSystemService(android.hardware.camera2.CameraManager.class);
-      for (String id : manager.getCameraIdList()) {
-        android.hardware.camera2.CameraCharacteristics c = manager.getCameraCharacteristics(id);
-        if (!Integer.valueOf(1)
-            .equals(c.get(android.hardware.camera2.CameraCharacteristics.LENS_FACING))) continue;
-        android.hardware.camera2.params.StreamConfigurationMap map =
-            c.get(android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-        android.util.Size size =
-            CameraActivity.largest(
-                map.getOutputSizes(android.graphics.ImageFormat.JPEG),
-                map.getHighResolutionOutputSizes(android.graphics.ImageFormat.JPEG));
-        if (Build.VERSION.SDK_INT >= 31) {
-          android.hardware.camera2.params.StreamConfigurationMap full =
-              c.get(
-                  android.hardware.camera2.CameraCharacteristics
-                      .SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION);
-          if (full != null)
-            size =
-                CameraActivity.largest(
-                    new android.util.Size[] {size},
-                    full.getOutputSizes(android.graphics.ImageFormat.JPEG),
-                    full.getHighResolutionOutputSizes(android.graphics.ImageFormat.JPEG));
-        }
-        int width = prefs.getInt("active_jpeg_width", size.getWidth()),
-            height = prefs.getInt("active_jpeg_height", size.getHeight());
-        message = width + " × " + height;
-        break;
-      }
-    } catch (Exception ignored) {
+      Dialog dialog = PhotoResolution.picker(this, PhotoResolution.discover(this), this::build);
+      dialog.show();
+    } catch (Exception error) {
+      Ui.error(this, error);
     }
-    new AlertDialog.Builder(this)
-        .setTitle("扫描分辨率 · 高")
-        .setMessage(message)
-        .setPositiveButton("关闭", null)
-        .show();
   }
 
   private void storage() {
-    android.os.StatFs disk = new android.os.StatFs(getFilesDir().getPath());
-    long bytes = size(getFilesDir());
-    new AlertDialog.Builder(this)
-        .setTitle("管理存储")
-        .setMessage(
-            String.format(
-                Locale.getDefault(),
-                "文档占用 %.1f MB\n可用空间 %.1f GB",
-                bytes / 1048576d,
-                disk.getAvailableBytes() / 1073741824d))
-        .setItems(
-            new String[] {"清理临时文件", "查看回收站"},
-            (d, w) -> {
-              if (w == 0) {
-                File exports = new File(getCacheDir(), "exports");
-                delete(exports);
-                Toast.makeText(this, "临时文件已清理", Toast.LENGTH_SHORT).show();
-              } else startActivity(new Intent(this, MainActivity.class).putExtra("trash", true));
-            })
-        .setPositiveButton("关闭", null)
-        .show();
+    StorageManagementDialog.show(this);
   }
 
   private static long size(File f) {
@@ -339,13 +392,157 @@ public final class SettingsActivity extends Activity {
     }
   }
 
+  private void twoPagesOrder() {
+    LinearLayout guide = Ui.column(this);
+    guide.setGravity(Gravity.CENTER_HORIZONTAL);
+    guide.setBackgroundColor(0xffeceff1);
+    Ui.padding(guide, 32, 32);
+    ImageView arrow = new ImageView(this);
+    arrow.setImageResource(R.drawable.myflat_settings_order_arrow);
+    guide.addView(arrow, new LinearLayout.LayoutParams(Ui.dp(this, 34), Ui.dp(this, 16)));
+    guide.addView(Ui.spacer(this, 16));
+    com.airbnb.lottie.LottieAnimationView animation =
+        new com.airbnb.lottie.LottieAnimationView(this);
+    boolean right = ScanSettings.defaults(this).rightFirst;
+    animation.setAnimation(
+        right ? R.raw.myflat_settings_order_right : R.raw.myflat_settings_order_left);
+    animation.setRepeatCount(-1);
+    animation.playAnimation();
+    guide.addView(animation, new LinearLayout.LayoutParams(-1, Ui.dp(this, 260)));
+    choice(
+        "两页扫描顺序",
+        new String[] {"从左至右", "从右至左"},
+        right ? 1 : 0,
+        n -> {
+          ScanSettings s = ScanSettings.defaults(this);
+          s.rightFirst = n == 1;
+          s.save(this);
+          arrow.setScaleX(n == 1 ? -1 : 1);
+          animation.setAnimation(
+              n == 1 ? R.raw.myflat_settings_order_right : R.raw.myflat_settings_order_left);
+          animation.playAnimation();
+        },
+        guide);
+    arrow.setScaleX(right ? -1 : 1);
+  }
+
   private void backup() {
-    new AlertDialog.Builder(this)
-        .setTitle("备份与恢复")
-        .setItems(
-            new String[] {"备份到文件", "从备份文件恢复"},
-            (d, w) -> {
-              if (w == 0)
+    LinearLayout body = Ui.column(this);
+    item(body, "备份", "", "将你的 MyFlat 数据导出为备份文件。", this::backupFile);
+    item(
+        body,
+        "恢复",
+        "",
+        "从 MyFlat 的备份文件中恢复数据。",
+        () ->
+            startActivityForResult(
+                new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                    .setType("application/zip")
+                    .addCategory(Intent.CATEGORY_OPENABLE),
+                2));
+    item(body, "恢复丢失的页面", "", "添加由于错误而不在数据库中的文件夹或页面。", this::recover);
+    LinearLayout guide = Ui.column(this);
+    Ui.padding(guide, 16, 12);
+    guide.addView(Ui.line(this));
+    guide.addView(Ui.spacer(this, 12));
+    guide.addView(Ui.text(this, "备份文件将保存到您选择的文件夹中。", 14, 0xff666666));
+    guide.addView(Ui.spacer(this, 4));
+    guide.addView(Ui.text(this, "请注意，任何移动到垃圾桶的数据都不会被备份。", 14, 0xff666666));
+    guide.addView(Ui.spacer(this, 4));
+    TextView feedback = Ui.text(this, "如果您在备份/恢复方面有任何问题，请通过客户支持与我们联系。", 14, 0xff666666);
+    feedback.setOnClickListener(v -> Support.show(this));
+    guide.addView(feedback);
+    body.addView(guide);
+    page("备份 / 恢复", body);
+  }
+
+  private void backupFile() {
+    includeLocked = false;
+    inspectBackup(false);
+  }
+
+  private void inspectBackup(boolean include) {
+    busy = true;
+    ProgressDialog waiting = ProgressDialog.show(this, "", "正在分析数据以准备备份", true, false);
+    MyFlatApp.of(this)
+        .io
+        .submit(
+            () -> {
+              try {
+                Backup.Preview preview = Backup.inspect(this, include);
+                runOnUiThread(
+                    () -> {
+                      busy = false;
+                      waiting.dismiss();
+                      transferInfo(false, preview, null);
+                    });
+              } catch (Exception ex) {
+                runOnUiThread(
+                    () -> {
+                      busy = false;
+                      waiting.dismiss();
+                      Ui.error(this, ex);
+                    });
+              }
+            });
+  }
+
+  private void transferInfo(boolean restoring, Backup.Preview preview, Uri archive) {
+    if (transferDialog != null) transferDialog.dismiss();
+    transferBody = Ui.column(this);
+    Ui.padding(transferBody, 24, 24);
+    transferBody.addView(Ui.spacer(this, 40));
+    TextView title = Ui.bold(this, restoring ? "准备好恢复数据" : "准备好备份数据", 22);
+    title.setGravity(Gravity.CENTER);
+    transferBody.addView(title);
+    transferBody.addView(Ui.spacer(this, 40));
+    ImageView image = new ImageView(this);
+    image.setImageResource(
+        restoring ? R.drawable.myflat_restore_ready : R.drawable.myflat_backup_ready);
+    image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+    transferBody.addView(image, new LinearLayout.LayoutParams(-1, Ui.dp(this, 130)));
+    transferBody.addView(new Space(this), new LinearLayout.LayoutParams(1, 0, 1));
+    if (!restoring && FolderSecurity.hasSecureFolders(this)) {
+      CheckBox secured = Ui.check(this, "包括锁定的文件夹", includeLocked);
+      secured.setOnCheckedChangeListener(
+          (button, checked) -> {
+            if (!checked) {
+              includeLocked = false;
+              inspectBackup(false);
+              return;
+            }
+            secured.setOnCheckedChangeListener(null);
+            secured.setChecked(false);
+            FolderSecurity.authenticate(
+                this,
+                () -> {
+                  includeLocked = true;
+                  inspectBackup(true);
+                },
+                () -> transferInfo(false, preview, null));
+          });
+      transferBody.addView(secured);
+    }
+    LinearLayout summary = Ui.column(this);
+    Ui.padding(summary, 20, 20);
+    summary.setBackground(Ui.shape(0xfffafafa, Ui.dp(this, 20)));
+    summaryRow(summary, "页面", Integer.toString(preview.pages));
+    summary.addView(Ui.spacer(this, 8));
+    summaryRow(summary, "文件夹", Integer.toString(preview.folders));
+    summary.addView(Ui.spacer(this, 20));
+    summary.addView(Ui.line(this));
+    summary.addView(Ui.spacer(this, 20));
+    summaryRow(
+        summary, "估计大小", String.format(Locale.getDefault(), "%.1f MB", preview.bytes / 1048576d));
+    transferBody.addView(summary);
+    transferBody.addView(Ui.spacer(this, 32));
+    TextView start =
+        Ui.primary(
+            this,
+            "开始",
+            () -> {
+              if (restoring) transfer(2, archive);
+              else
                 startActivityForResult(
                     new Intent(Intent.ACTION_CREATE_DOCUMENT)
                         .setType("application/zip")
@@ -357,56 +554,172 @@ public final class SettingsActivity extends Activity {
                                     .format(new Date())
                                 + ".zip"),
                     1);
-              else
-                startActivityForResult(
-                    new Intent(Intent.ACTION_OPEN_DOCUMENT)
-                        .setType("application/zip")
-                        .addCategory(Intent.CATEGORY_OPENABLE),
-                    2);
-            })
-        .show();
+            });
+    transferBody.addView(start, new LinearLayout.LayoutParams(-1, Ui.dp(this, 48)));
+    transferDialog = page(restoring ? "恢复" : "备份", transferBody);
+  }
+
+  private void summaryRow(LinearLayout body, String title, String value) {
+    LinearLayout row = Ui.row(this);
+    row.addView(Ui.text(this, title, 16, Ui.INK), new LinearLayout.LayoutParams(0, -2, 1));
+    row.addView(Ui.text(this, value, 16, Ui.INK));
+    body.addView(row);
+  }
+
+  private void recover() {
+    if (busy) return;
+    if (FolderSecurity.hasPin(this))
+      FolderSecurity.authenticate(this, this::recoverAllowed, () -> {});
+    else recoverAllowed();
+  }
+
+  private void recoverAllowed() {
+    if (busy) return;
+    busy = true;
+    ProgressDialog waiting = ProgressDialog.show(this, "", "正在查找丢失的页面", true, false);
+    MyFlatApp.of(this)
+        .io
+        .submit(
+            () -> {
+              try {
+                LostPages.Preview found = LostPages.inspect(this);
+                runOnUiThread(
+                    () -> {
+                      busy = false;
+                      waiting.dismiss();
+                      Ui.alert(this)
+                          .setTitle("恢复丢失的页面")
+                          .setMessage("找到 " + found.pages + " 个页面。")
+                          .setNegativeButton("取消", null)
+                          .setPositiveButton("恢复", (d, w) -> restoreLost(found))
+                          .show();
+                    });
+              } catch (Exception ex) {
+                runOnUiThread(
+                    () -> {
+                      busy = false;
+                      waiting.dismiss();
+                      Ui.error(this, ex);
+                    });
+              }
+            });
+  }
+
+  private void restoreLost(LostPages.Preview found) {
+    busy = true;
+    ProgressDialog waiting = ProgressDialog.show(this, "", "正在恢复", true, false);
+    MyFlatApp.of(this)
+        .io
+        .submit(
+            () -> {
+              try {
+                int count = LostPages.restore(this, found);
+                MyFlatApp.of(this).store.recoverQueue();
+                MyFlatApp.of(this).startProcessing();
+                runOnUiThread(
+                    () -> {
+                      busy = false;
+                      waiting.dismiss();
+                      Ui.alert(this)
+                          .setTitle("恢复完成")
+                          .setMessage("已恢复 " + count + " 个页面。")
+                          .setPositiveButton("确定", null)
+                          .show();
+                    });
+              } catch (Exception ex) {
+                runOnUiThread(
+                    () -> {
+                      busy = false;
+                      waiting.dismiss();
+                      Ui.error(this, ex);
+                    });
+              }
+            });
   }
 
   private void advanced() {
-    new AlertDialog.Builder(this)
-        .setTitle("高级设置")
-        .setItems(
-            new String[] {"拍摄与处理", "扫描指南", "恢复未完成的页面"},
-            (d, w) -> {
-              if (w == 0) {
-                EffectsForm form = new EffectsForm(this, ScanSettings.defaults(this), false);
-                new AlertDialog.Builder(this)
-                    .setTitle("拍摄与处理")
-                    .setView(form.view)
-                    .setNegativeButton("取消", null)
-                    .setPositiveButton("应用", (a, b) -> form.value().save(this))
-                    .show();
-              } else if (w == 1) new ScanGuideDialog(this, 0, () -> {}).show();
-              else {
-                MyFlatApp.of(this).store.recoverQueue();
-                MyFlatApp.of(this).startProcessing();
-                Toast.makeText(this, "已恢复处理队列", Toast.LENGTH_SHORT).show();
-              }
-            })
-        .show();
+    LinearLayout body = Ui.column(this);
+    item(
+        body,
+        "相机API版本",
+        prefs.getInt("camera_api", 2) == 1 ? "Camera1" : "Camera2",
+        "选择用于扫描的相机API。",
+        () ->
+            choice(
+                "相机API版本",
+                new String[] {"Camera1", "Camera2"},
+                prefs.getInt("camera_api", 2) - 1,
+                value -> prefs.edit().putInt("camera_api", value + 1).apply()));
+    toggle(body, "扫描前自动对焦", "", "explicit_focus", true);
+    toggle(body, "点击屏幕进行扫描", "", "preview_touch_scan", false);
+    toggle(body, "放大预览", "", "zoom_preview", false);
+    toggle(body, "显示扫描区域", "显示要扫描的区域。", "show_scan_guide", true);
+    item(body, "恢复丢失的页面", "", "添加由于错误而不在数据库中的文件夹或页面。", this::recover);
+    page("高级设置", body);
   }
 
   private void textPage(String title, String content) {
-    new AlertDialog.Builder(this)
-        .setTitle(title)
-        .setMessage(content)
-        .setPositiveButton("关闭", null)
-        .show();
+    Ui.alert(this).setTitle(title).setMessage(content).setPositiveButton("关闭", null).show();
   }
 
   @Override
   protected void onActivityResult(int request, int result, Intent data) {
     super.onActivityResult(request, result, data);
     if (result != RESULT_OK || data == null || data.getData() == null || busy) return;
-    busy = true;
     Uri uri = data.getData();
-    ProgressDialog progress =
-        ProgressDialog.show(this, "", request == 1 ? "正在备份" : "正在恢复", true, false);
+    if (request == 1) {
+      transfer(request, uri);
+      return;
+    }
+    if (request != 2) return;
+    busy = true;
+    ProgressDialog waiting = ProgressDialog.show(this, "", "正在分析备份文件以恢复数据", true, false);
+    MyFlatApp.of(this)
+        .io
+        .submit(
+            () -> {
+              try {
+                Backup.Preview preview = Backup.inspect(this, uri);
+                runOnUiThread(
+                    () -> {
+                      busy = false;
+                      waiting.dismiss();
+                      transferInfo(true, preview, uri);
+                    });
+              } catch (Exception ex) {
+                runOnUiThread(
+                    () -> {
+                      busy = false;
+                      waiting.dismiss();
+                      Ui.error(this, ex);
+                    });
+              }
+            });
+  }
+
+  private void transfer(int request, Uri uri) {
+    if (busy) return;
+    busy = true;
+    if (transferDialog == null) {
+      transferBody = Ui.column(this);
+      transferDialog = page(request == 1 ? "备份" : "恢复", transferBody);
+    }
+    transferDialog.setCancelable(false);
+    transferBody.removeAllViews();
+    Ui.padding(transferBody, 24, 24);
+    transferBody.addView(Ui.spacer(this, 40));
+    TextView title = Ui.bold(this, request == 1 ? "正在备份" : "正在恢复", 22);
+    title.setGravity(Gravity.CENTER);
+    transferBody.addView(title);
+    com.airbnb.lottie.LottieAnimationView animation =
+        new com.airbnb.lottie.LottieAnimationView(this);
+    animation.setAnimation(R.raw.myflat_backup_progress);
+    animation.setRepeatCount(-1);
+    animation.playAnimation();
+    transferBody.addView(animation, new LinearLayout.LayoutParams(-1, Ui.dp(this, 280)));
+    TextView notice = Ui.text(this, "请不要在备份或恢复过程中关闭应用。", 16, 0xff666666);
+    notice.setGravity(Gravity.CENTER);
+    transferBody.addView(notice);
     MyFlatApp.of(this)
         .io
         .submit(
@@ -415,7 +728,7 @@ public final class SettingsActivity extends Activity {
                 if (request == 1) {
                   try (OutputStream out = getContentResolver().openOutputStream(uri)) {
                     if (out == null) throw new IOException("无法打开文件");
-                    Backup.write(this, out);
+                    Backup.write(this, out, includeLocked);
                   }
                 } else {
                   try (InputStream in = getContentResolver().openInputStream(uri)) {
@@ -423,22 +736,50 @@ public final class SettingsActivity extends Activity {
                     Backup.restore(this, in);
                   }
                 }
-                runOnUiThread(
-                    () -> {
-                      busy = false;
-                      progress.dismiss();
-                      Toast.makeText(this, "已完成", Toast.LENGTH_SHORT).show();
-                      MyFlatApp.of(this).startProcessing();
-                    });
+                runOnUiThread(() -> transferDone(request));
               } catch (Exception ex) {
                 runOnUiThread(
                     () -> {
                       busy = false;
-                      progress.dismiss();
+                      transferDialog.setCancelable(true);
+                      transferDialog.dismiss();
+                      transferDialog = null;
                       Ui.error(this, ex);
                     });
               }
             });
+  }
+
+  private void transferDone(int request) {
+    busy = false;
+    transferDialog.setCancelable(true);
+    transferBody.removeAllViews();
+    transferBody.addView(Ui.spacer(this, 40));
+    TextView title = Ui.bold(this, request == 1 ? "备份完成" : "恢复完成", 22);
+    title.setGravity(Gravity.CENTER);
+    transferBody.addView(title);
+    transferBody.addView(Ui.spacer(this, 40));
+    ImageView image = new ImageView(this);
+    image.setImageResource(
+        request == 1 ? R.drawable.myflat_backup_done : R.drawable.myflat_restore_done);
+    image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+    transferBody.addView(image, new LinearLayout.LayoutParams(-1, Ui.dp(this, 130)));
+    transferBody.addView(Ui.spacer(this, 32));
+    TextView description =
+        Ui.text(this, request == 1 ? "备份文件已保存到文件夹中。" : "数据已成功恢复。", 16, 0xff666666);
+    description.setGravity(Gravity.CENTER);
+    transferBody.addView(description);
+    transferBody.addView(new Space(this), new LinearLayout.LayoutParams(1, 0, 1));
+    TextView done =
+        Ui.primary(
+            this,
+            "关闭",
+            () -> {
+              transferDialog.dismiss();
+              transferDialog = null;
+            });
+    transferBody.addView(done, new LinearLayout.LayoutParams(-1, Ui.dp(this, 48)));
+    MyFlatApp.of(this).startProcessing();
   }
 
   @Override

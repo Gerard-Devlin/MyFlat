@@ -16,7 +16,8 @@ public final class EditorActivity extends Activity {
   private DocumentStore store;
   private DocumentStore.Page page;
   private PageCanvas canvas;
-  private Bitmap processed, original;
+  private Bitmap processed, original, paperBackground;
+  private TextView editDone, editReset;
   private boolean comparing = false, dirty = false, registered = false;
   private float ratio = 0, cropRotation = 0;
   private int quarterRotation = 0;
@@ -33,6 +34,7 @@ public final class EditorActivity extends Activity {
 
   @Override
   public void onCreate(Bundle state) {
+    AppAppearance.prepare(this);
     super.onCreate(state);
     store = MyFlatApp.of(this).store;
     pageId = state != null ? state.getString("page") : getIntent().getStringExtra("page");
@@ -68,8 +70,12 @@ public final class EditorActivity extends Activity {
   }
 
   private void load() {
+    FolderSecurity.requirePage(this, pageId, this::loadAllowed, this::finish);
+  }
+
+  private void loadAllowed() {
     page = store.page(pageId);
-    if (page == null) {
+    if (page == null || page.deleted != 0) {
       finish();
       return;
     }
@@ -129,6 +135,7 @@ public final class EditorActivity extends Activity {
       if (document != null)
         for (DocumentStore.Folder f : store.folders()) if (f.id == document.folder) title = f.name;
       TextView name = Ui.bold(this, title, 16);
+      AppAppearance.keepText(name);
       name.setSingleLine(true);
       name.setEllipsize(android.text.TextUtils.TruncateAt.END);
       labels.addView(name);
@@ -136,27 +143,41 @@ public final class EditorActivity extends Activity {
       LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, Ui.dp(this, 56), 1);
       lp.leftMargin = Ui.dp(this, 16);
       header.addView(labels, lp);
-      header.addView(Ui.iconButton(this, "compare", "原图对比", this::compare));
+      FrameLayout tag = new FrameLayout(this);
+      ImageView tagImage = new ImageView(this);
+      tagImage.setImageResource(tagResource(page.colorTag));
+      tag.addView(
+          tagImage, new FrameLayout.LayoutParams(Ui.dp(this, 24), Ui.dp(this, 24), Gravity.CENTER));
+      tag.setContentDescription("颜色标签");
+      tag.setBackgroundResource(android.R.drawable.list_selector_background);
+      tag.setOnClickListener(v -> colorTags(tag));
+      header.addView(tag, new LinearLayout.LayoutParams(Ui.dp(this, 48), Ui.dp(this, 56)));
     } else {
-      header.addView(new Space(this), new LinearLayout.LayoutParams(0, 1, 1));
-      if (mode == PageCanvas.Mode.CROP)
-        header.addView(
-            headerText(
-                "重置",
-                () -> {
-                  cropRotation = 0;
-                  ratio = 0;
-                  canvas.image(processed);
-                  canvas.mode(PageCanvas.Mode.CROP);
-                  build(PageCanvas.Mode.CROP);
-                }));
-      header.addView(headerText("完成", this::saveEdit));
+      if (mode == PageCanvas.Mode.ERASE) {
+        TextView title = Ui.text(this, "擦除", 20, Ui.INK);
+        title.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, Ui.dp(this, 56), 1);
+        lp.leftMargin = Ui.dp(this, 16);
+        header.addView(title, lp);
+      } else header.addView(new Space(this), new LinearLayout.LayoutParams(0, 1, 1));
+      editReset = headerText("重启", () -> build(mode));
+      header.addView(editReset);
+      editDone = headerText("完成", this::saveEdit);
+      header.addView(editDone);
+      dirty = false;
+      updateEditActions();
     }
     header.setElevation(Ui.dp(this, 1));
     root.addView(header);
     canvas = new PageCanvas(this);
     canvas.image(processed);
     canvas.mode(mode);
+    canvas.onChanged =
+        () -> {
+          dirty = true;
+          updateEditActions();
+        };
+    if (mode == PageCanvas.Mode.ERASE) canvas.paperBackground(paperBackground);
     if (mode == PageCanvas.Mode.VIEW) loadDetail(false);
     canvas.onSwipe = direction -> navigate(pages, at + direction);
     root.addView(canvas, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -164,25 +185,37 @@ public final class EditorActivity extends Activity {
       cropBase = processed;
       cropRotation = 0;
       quarterRotation = 0;
-      LinearLayout controls = Ui.column(this);
-      controls.setGravity(Gravity.CENTER_HORIZONTAL);
+      ratio = 0;
+      FrameLayout controls = new FrameLayout(this);
       controls.setBackgroundColor(Color.WHITE);
-      controls.addView(Ui.spacer(this, 32));
-      TextView paper = Ui.text(this, "比例：自定义  ⌄", 13, Ui.INK);
+      LinearLayout paper = Ui.row(this);
       paper.setGravity(Gravity.CENTER);
-      android.graphics.drawable.GradientDrawable outline = Ui.shape(Color.WHITE, Ui.dp(this, 18));
-      outline.setStroke(Ui.dp(this, 1), 0xffaaaaaa);
+      paper.setPadding(Ui.dp(this, 16), 0, Ui.dp(this, 8), 0);
+      TextView paperLabel = Ui.bold(this, "比例：自订", 13);
+      paperLabel.setIncludeFontPadding(false);
+      paper.addView(paperLabel);
+      ImageView dropdown = new ImageView(this);
+      dropdown.setImageResource(R.drawable.myflat_crop_arrow_down);
+      LinearLayout.LayoutParams arrowParams =
+          new LinearLayout.LayoutParams(Ui.dp(this, 24), Ui.dp(this, 24));
+      arrowParams.leftMargin = Ui.dp(this, 4);
+      paper.addView(dropdown, arrowParams);
+      android.graphics.drawable.GradientDrawable outline = Ui.shape(Color.WHITE, Ui.dp(this, 32));
+      outline.setStroke(Ui.dp(this, 1), 0xff9e9e9e);
       paper.setBackground(outline);
-      controls.addView(paper, new LinearLayout.LayoutParams(Ui.dp(this, 140), Ui.dp(this, 32)));
+      FrameLayout.LayoutParams paperParams =
+          new FrameLayout.LayoutParams(
+              -2, Ui.dp(this, 32), Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+      paperParams.topMargin = Ui.dp(this, 24);
+      controls.addView(paper, paperParams);
       LinearLayout ratios = Ui.row(this);
+      ratios.setGravity(Gravity.CENTER_VERTICAL);
       HorizontalScrollView ratioScroll = new HorizontalScrollView(this);
       ratioScroll.setHorizontalScrollBarEnabled(false);
-      ratioScroll.addView(ratios);
+      ratioScroll.addView(ratios, new HorizontalScrollView.LayoutParams(-2, -1));
       ratioScroll.setVisibility(View.GONE);
-      String[] names = {"自定义", "长方形", "原版的", "标准", "A4", "Letter"};
-      String[] labels = {
-        "", "", processed.getWidth() + ":" + processed.getHeight(), "152:225", "210:297", "8.5:11"
-      };
+      String[] names = {"自订", "长方形", "原版的", "标准", "A4", "Letter"};
+      String[] labels = {"", "", "", "152:225", "210:297", "8.5:11"};
       float[] values = {
         0,
         -1,
@@ -191,87 +224,154 @@ public final class EditorActivity extends Activity {
         210f / 297,
         8.5f / 11
       };
-      String[] icons = {
-        "myflat_crop_ic_custom",
-        "myflat_crop_ic_rectangle",
-        "myflat_crop_ic_original",
-        "myflat_crop_ic_standard",
-        "myflat_crop_ic_a4",
-        "myflat_crop_ic_letter"
+      int[] icons = {
+        R.drawable.myflat_crop_ic_custom,
+        R.drawable.myflat_crop_ic_rectangle,
+        R.drawable.myflat_crop_ic_original,
+        R.drawable.myflat_crop_ic_standard,
+        R.drawable.myflat_crop_ic_a4,
+        R.drawable.myflat_crop_ic_letter
       };
+      List<ImageView> ratioIcons = new ArrayList<>();
+      List<TextView> ratioLabels = new ArrayList<>(), ratioValues = new ArrayList<>();
       for (int n = 0; n < names.length; n++) {
         int selected = n;
         LinearLayout item = Ui.column(this);
         item.setGravity(Gravity.CENTER);
         Ui.padding(item, 12, 4);
         ImageView icon = new ImageView(this);
-        int resource = getResources().getIdentifier(icons[n], "drawable", getPackageName());
-        if (resource != 0) icon.setImageResource(resource);
-        else icon.setImageResource(R.drawable.myflat_ic_crop);
-        icon.setImageTintList(android.content.res.ColorStateList.valueOf(Ui.INK));
+        icon.setImageResource(icons[n]);
+        icon.setImageTintList(
+            android.content.res.ColorStateList.valueOf(n == 0 ? Ui.GREEN : Ui.INK));
         item.addView(icon, new LinearLayout.LayoutParams(Ui.dp(this, 28), Ui.dp(this, 32)));
         TextView label = Ui.bold(this, names[n], 12);
+        label.setTextColor(n == 0 ? Ui.GREEN : Ui.INK);
         label.setGravity(Gravity.CENTER);
-        Ui.padding(label, 0, 4);
-        item.addView(label);
-        TextView aspect = Ui.text(this, labels[n], 10, Ui.INK);
+        LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(-2, -2);
+        labelParams.topMargin = Ui.dp(this, 6);
+        item.addView(label, labelParams);
+        TextView aspect = Ui.text(this, labels[n], 10, n == 0 ? Ui.GREEN : 0xff757575);
         aspect.setGravity(Gravity.CENTER);
-        item.addView(aspect);
+        LinearLayout.LayoutParams aspectParams = new LinearLayout.LayoutParams(-2, -2);
+        aspectParams.topMargin = Ui.dp(this, 2);
+        item.addView(aspect, aspectParams);
+        ratioIcons.add(icon);
+        ratioLabels.add(label);
+        ratioValues.add(aspect);
         item.setContentDescription(names[n] + "比例");
+        item.setBackgroundResource(android.R.drawable.list_selector_background);
         item.setOnClickListener(
             v -> {
               ratio = values[selected];
               canvas.ratio(ratio);
-              paper.setText("比例：" + names[selected] + "  ⌄");
-              for (int j = 0; j < ratios.getChildCount(); j++)
-                ratios
-                    .getChildAt(j)
-                    .setBackgroundColor(j == selected ? 0xffd5f3ee : Color.TRANSPARENT);
+              dirty = true;
+              updateEditActions();
+              paperLabel.setText("比例：" + names[selected]);
+              for (int j = 0; j < ratioIcons.size(); j++) {
+                int color = j == selected ? Ui.GREEN : Ui.INK;
+                ratioIcons
+                    .get(j)
+                    .setImageTintList(android.content.res.ColorStateList.valueOf(color));
+                ratioLabels.get(j).setTextColor(color);
+                ratioValues.get(j).setTextColor(j == selected ? Ui.GREEN : 0xff757575);
+              }
             });
-        ratios.addView(item, new LinearLayout.LayoutParams(Ui.dp(this, 84), Ui.dp(this, 88)));
+        ratios.addView(item, new LinearLayout.LayoutParams(Ui.dp(this, 88), -1));
       }
-      controls.addView(Ui.spacer(this, 30));
       LinearLayout ruler = Ui.row(this);
       Ui.padding(ruler, 8, 0);
-      ruler.addView(Ui.iconButton(this, "rotate_left", "向左旋转90度", () -> cropRotate(-90)));
+      ruler.addView(
+          resourceButton(R.drawable.myflat_crop_rotate_right, "向右旋转90度", () -> cropRotate(90)));
       AngleRuler angle = new AngleRuler(this);
-      ruler.addView(angle, new LinearLayout.LayoutParams(0, Ui.dp(this, 68), 1));
+      ruler.addView(angle, new LinearLayout.LayoutParams(0, Ui.dp(this, 56), 1));
       angle.changed =
           value -> {
             cropRotation = value;
             applyCropRotation();
           };
-      ruler.addView(Ui.iconButton(this, "rotate_right", "向右旋转90度", () -> cropRotate(90)));
-      controls.addView(ruler);
-      controls.addView(ratioScroll, new LinearLayout.LayoutParams(-1, Ui.dp(this, 88)));
+      ruler.addView(
+          resourceButton(R.drawable.myflat_crop_rotate_left, "向左旋转90度", () -> cropRotate(270)));
+      FrameLayout.LayoutParams rulerParams =
+          new FrameLayout.LayoutParams(-1, Ui.dp(this, 56), Gravity.BOTTOM);
+      rulerParams.bottomMargin = Ui.dp(this, 24);
+      controls.addView(ruler, rulerParams);
+      FrameLayout.LayoutParams ratioParams = new FrameLayout.LayoutParams(-1, -1);
+      ratioParams.topMargin = Ui.dp(this, 68);
+      controls.addView(ratioScroll, ratioParams);
       paper.setOnClickListener(
           v -> {
             boolean open = ratioScroll.getVisibility() != View.VISIBLE;
             ratioScroll.setVisibility(open ? View.VISIBLE : View.GONE);
             ruler.setVisibility(open ? View.GONE : View.VISIBLE);
+            dropdown.setRotation(open ? 180 : 0);
           });
       root.addView(controls, new LinearLayout.LayoutParams(-1, Ui.dp(this, 210)));
+      root.post(
+          () -> {
+            android.view.ViewGroup.LayoutParams lp = controls.getLayoutParams();
+            lp.height =
+                Math.max(
+                    Ui.dp(this, 168),
+                    Math.round(
+                        (root.getHeight() - root.getPaddingTop() - root.getPaddingBottom())
+                            * .25f));
+            controls.setLayoutParams(lp);
+          });
     } else if (mode == PageCanvas.Mode.ERASE) {
+      LinearLayout controls = Ui.column(this);
+      controls.setGravity(Gravity.CENTER_HORIZONTAL);
+      controls.setBackgroundColor(Color.WHITE);
       SeekBar size = new SeekBar(this);
-      size.setMax(54);
-      size.setProgress(10);
-      Ui.padding(size, 20, 0);
+      size.setMax(1000);
+      float thickness = getSharedPreferences("preferences", 0).getFloat("cleanup_thickness", 24);
+      size.setProgress(Math.round((thickness - 12) / 36 * 1000));
+      size.setProgressDrawable(getDrawable(R.drawable.myflat_cleanup_track));
+      size.setThumb(getDrawable(R.drawable.myflat_cleanup_thumb));
+      size.setThumbTintList(null);
+      canvas.brush(Ui.dp(this, thickness / 2));
+      LinearLayout.LayoutParams seekParams = new LinearLayout.LayoutParams(-1, Ui.dp(this, 48));
+      seekParams.leftMargin = seekParams.rightMargin = Ui.dp(this, 46);
+      controls.addView(size, seekParams);
+      LinearLayout undoBar = Ui.row(this);
+      undoBar.setGravity(Gravity.CENTER);
+      View undo = resourceButton(R.drawable.myflat_cleanup_undo, "撤销", canvas::undo);
+      View redo = resourceButton(R.drawable.myflat_cleanup_redo, "重做", canvas::redo);
+      undoBar.addView(undo);
+      undoBar.addView(new Space(this), new LinearLayout.LayoutParams(Ui.dp(this, 16), 1));
+      undoBar.addView(redo);
+      controls.addView(undoBar, new LinearLayout.LayoutParams(-1, Ui.dp(this, 48)));
+      root.addView(controls, new LinearLayout.LayoutParams(-1, Ui.dp(this, 100)));
+      Runnable refresh =
+          () -> {
+            dirty = canvas.hasUndo();
+            undo.setEnabled(canvas.hasUndo());
+            undo.setAlpha(canvas.hasUndo() ? 1 : .3f);
+            redo.setEnabled(canvas.hasRedo());
+            redo.setAlpha(canvas.hasRedo() ? 1 : .3f);
+            updateEditActions();
+          };
+      canvas.onChanged = refresh;
+      refresh.run();
       size.setOnSeekBarChangeListener(
           new SeekBar.OnSeekBarChangeListener() {
-            public void onProgressChanged(SeekBar s, int p, boolean user) {
-              canvas.brush(Ui.dp(EditorActivity.this, p + 6));
+            public void onProgressChanged(SeekBar seek, int p, boolean user) {
+              float value = 12 + p * 36 / 1000f;
+              canvas.brush(Ui.dp(EditorActivity.this, value / 2));
+              if (user)
+                getSharedPreferences("preferences", 0)
+                    .edit()
+                    .putFloat("cleanup_thickness", value)
+                    .apply();
             }
 
-            public void onStartTrackingTouch(SeekBar s) {}
+            public void onStartTrackingTouch(SeekBar seek) {
+              canvas.showBrushPreview(true);
+            }
 
-            public void onStopTrackingTouch(SeekBar s) {}
+            public void onStopTrackingTouch(SeekBar seek) {
+              canvas.showBrushPreview(false);
+            }
           });
-      root.addView(size);
-      LinearLayout bar = Ui.row(this);
-      action(bar, "back", "取消", () -> build(PageCanvas.Mode.VIEW));
-      action(bar, "rotate", "撤销", canvas::undo);
-      action(bar, "check", "保存", this::saveEdit);
-      root.addView(bar);
     } else {
       root.addView(Ui.line(this));
       LinearLayout bar = Ui.row(this);
@@ -279,6 +379,30 @@ public final class EditorActivity extends Activity {
       ActionMenus.toolbar(this, bar, "editor", menuItems(), () -> build(PageCanvas.Mode.VIEW));
       root.addView(bar);
     }
+  }
+
+  private void updateEditActions() {
+    if (editDone != null) {
+      editDone.setEnabled(dirty);
+      editDone.setTextColor(dirty ? Ui.GREEN : 0xff9e9e9e);
+    }
+    if (editReset != null) {
+      editReset.setEnabled(dirty);
+      editReset.setTextColor(dirty ? Ui.INK : 0xff9e9e9e);
+    }
+  }
+
+  private View resourceButton(int resource, String label, Runnable action) {
+    FrameLayout frame = new FrameLayout(this);
+    ImageView icon = new ImageView(this);
+    icon.setImageResource(resource);
+    frame.addView(
+        icon, new FrameLayout.LayoutParams(Ui.dp(this, 24), Ui.dp(this, 24), Gravity.CENTER));
+    frame.setLayoutParams(new LinearLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 40)));
+    frame.setContentDescription(label);
+    frame.setBackgroundResource(android.R.drawable.list_selector_background);
+    frame.setOnClickListener(v -> action.run());
+    return frame;
   }
 
   private TextView headerText(String title, Runnable click) {
@@ -313,6 +437,8 @@ public final class EditorActivity extends Activity {
   }
 
   private void applyCropRotation() {
+    dirty = true;
+    updateEditActions();
     Matrix rotate = new Matrix();
     rotate.postRotate(cropRotation);
     Bitmap image =
@@ -405,7 +531,7 @@ public final class EditorActivity extends Activity {
     }
   }
 
-  private void rotate() {
+  private void rotate(int degrees) {
     ProgressDialog progress = ProgressDialog.show(this, "", "正在旋转", true, false);
     MyFlatApp.of(this)
         .io
@@ -413,7 +539,7 @@ public final class EditorActivity extends Activity {
             () -> {
               try {
                 Bitmap full = Images.decode(store.file(page.result), 0);
-                Bitmap rotated = ImageMath.rotate(full, 90);
+                Bitmap rotated = ImageMath.rotate(full, degrees);
                 if (rotated != full) full.recycle();
                 store.complete(page, rotated, 100);
                 rotated.recycle();
@@ -524,7 +650,7 @@ public final class EditorActivity extends Activity {
     EffectsForm form = new EffectsForm(this, ScanSettings.parse(page.settings), false);
     ScrollView scroll = new ScrollView(this);
     scroll.addView(form.view);
-    new AlertDialog.Builder(this)
+    Ui.alert(this)
         .setTitle("从原图重新处理")
         .setMessage("新的效果将替换当前裁剪和擦除结果。")
         .setView(scroll)
@@ -584,20 +710,174 @@ public final class EditorActivity extends Activity {
 
   private List<ActionMenus.Item> menuItems() {
     return Arrays.asList(
-        new ActionMenus.Item(
-            "crop",
-            "裁剪",
-            () -> {
-              ratio = 0;
-              build(PageCanvas.Mode.CROP);
-            }),
+        new ActionMenus.Item("crop", "裁剪", () -> build(PageCanvas.Mode.CROP)),
         new ActionMenus.Item("share", "分享", this::share),
         new ActionMenus.Item("pdf", "创建 PDF", this::exportPdf),
         new ActionMenus.Item("trash", "删除", this::deletePage),
-        new ActionMenus.Item("rotate", "旋转", this::rotate),
-        new ActionMenus.Item("effects", "增强颜色", this::effects),
-        new ActionMenus.Item("erase", "擦除", () -> build(PageCanvas.Mode.ERASE)),
-        new ActionMenus.Item("compare", "原图", this::compare));
+        new ActionMenus.Item("move", "移动", this::movePage),
+        new ActionMenus.Item("gallery", "保存到图库", this::saveGallery),
+        new ActionMenus.Item("rescan", "重新扫描", this::rescan),
+        new ActionMenus.Item("erase", "擦除", this::beginErase),
+        new ActionMenus.Item(
+            "zip",
+            "创建 ZIP",
+            () ->
+                ExportActivity.open(
+                    this,
+                    "扫描页面",
+                    Collections.singletonList(store.page(page.id)),
+                    Exporter.Format.ZIP)),
+        new ActionMenus.Item("handwriting", "擦除笔记", this::removeHandwriting),
+        new ActionMenus.Item("rotate_left", "向左旋转", () -> rotate(-90)),
+        new ActionMenus.Item("rotate_right", "向右旋转", () -> rotate(90)));
+  }
+
+  private int tagResource(int color) {
+    return switch (color) {
+      case 0xffe57373 -> R.drawable.myflat_tag_red;
+      case 0xffffd54f -> R.drawable.myflat_tag_yellow;
+      case 0xff81c784 -> R.drawable.myflat_tag_green;
+      case 0xff90caf9 -> R.drawable.myflat_tag_blue;
+      case 0xffce93d8 -> R.drawable.myflat_tag_purple;
+      default -> R.drawable.myflat_tag_off;
+    };
+  }
+
+  private void colorTags(View anchor) {
+    int[] colors = {0, 0xffe57373, 0xffffd54f, 0xff81c784, 0xff90caf9, 0xffce93d8};
+    String[] labels = {"无标签", "红色标签", "黄色标签", "绿色标签", "蓝色标签", "紫色标签"};
+    LinearLayout content = Ui.row(this);
+    Ui.padding(content, 4, 8);
+    android.graphics.drawable.GradientDrawable bg = Ui.shape(Color.WHITE, Ui.dp(this, 8));
+    content.setBackground(bg);
+    PopupWindow popup = new PopupWindow(content, Ui.dp(this, 296), Ui.dp(this, 64), true);
+    popup.setBackgroundDrawable(bg);
+    popup.setElevation(Ui.dp(this, 8));
+    for (int i = 0; i < colors.length; i++) {
+      int color = colors[i];
+      FrameLayout choice = new FrameLayout(this);
+      ImageView icon = new ImageView(this);
+      icon.setImageResource(color == 0 ? R.drawable.myflat_tag_none : tagResource(color));
+      choice.addView(
+          icon, new FrameLayout.LayoutParams(Ui.dp(this, 28), Ui.dp(this, 28), Gravity.CENTER));
+      choice.setContentDescription(labels[i]);
+      choice.setBackgroundResource(android.R.drawable.list_selector_background);
+      choice.setOnClickListener(
+          v -> {
+            store.setColorTag(page.id, color);
+            page.colorTag = color;
+            popup.dismiss();
+            ((ImageView) ((FrameLayout) anchor).getChildAt(0)).setImageResource(tagResource(color));
+          });
+      content.addView(choice, new LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1));
+    }
+    popup.showAsDropDown(anchor, -Ui.dp(this, 248), 0, Gravity.END);
+  }
+
+  private void movePage() {
+    DocumentStore.Document document = store.document(page.document);
+    FolderPicker.show(
+        this,
+        document == null ? 1 : document.folder,
+        id -> {
+          FolderSecurity.require(
+              this,
+              id,
+              () -> {
+                store.movePages(Collections.singletonList(page.id), id);
+                finish();
+              },
+              null);
+        });
+  }
+
+  private void saveGallery() {
+    if (Build.VERSION.SDK_INT < 29
+        && checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+      requestPermissions(new String[] {android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, 601);
+      return;
+    }
+    ProgressDialog progress = ProgressDialog.show(this, "", "正在保存", true, false);
+    MyFlatApp.of(this)
+        .io
+        .submit(
+            () -> {
+              try {
+                Gallery.save(this, store.file(page.result));
+                runOnUiThread(
+                    () -> {
+                      progress.dismiss();
+                      Toast.makeText(this, "保存到图库", Toast.LENGTH_SHORT).show();
+                    });
+              } catch (Exception ex) {
+                runOnUiThread(
+                    () -> {
+                      progress.dismiss();
+                      Ui.error(this, ex);
+                    });
+              }
+            });
+  }
+
+  @Override
+  public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+    super.onRequestPermissionsResult(request, permissions, results);
+    if (request == 601
+        && results.length > 0
+        && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) saveGallery();
+  }
+
+  private void rescan() {
+    DocumentStore.Document document = store.document(page.document);
+    startActivity(
+        new Intent(this, CameraActivity.class)
+            .putExtra("rescan_page", page.id)
+            .putExtra("document", page.document)
+            .putExtra("folder", document == null ? 1 : document.folder));
+  }
+
+  private void beginErase() {
+    ProgressDialog progress = ProgressDialog.show(this, "", "处理中…", true, false);
+    MyFlatApp.of(this)
+        .io
+        .submit(
+            () -> {
+              try {
+                Bitmap paper = new dev.myflat.scanner.ScanEngine(this).paperBackground(processed);
+                runOnUiThread(
+                    () -> {
+                      progress.dismiss();
+                      if (isFinishing() || isDestroyed()) {
+                        paper.recycle();
+                        return;
+                      }
+                      if (paperBackground != null) paperBackground.recycle();
+                      paperBackground = paper;
+                      build(PageCanvas.Mode.ERASE);
+                    });
+              } catch (Exception ex) {
+                runOnUiThread(
+                    () -> {
+                      progress.dismiss();
+                      Ui.error(this, ex);
+                    });
+              }
+            });
+  }
+
+  private void removeHandwriting() {
+    startActivityForResult(
+        new Intent(this, HandwritingReviewActivity.class).putExtra("page", page.id), 602);
+  }
+
+  @Override
+  protected void onActivityResult(int request, int result, Intent data) {
+    super.onActivityResult(request, result, data);
+    if (request == 602 && result == RESULT_OK && data != null) {
+      pageId = data.getStringExtra("page");
+      load();
+    }
   }
 
   private void more() {
@@ -605,19 +885,19 @@ public final class EditorActivity extends Activity {
   }
 
   private void deletePage() {
-    new AlertDialog.Builder(this)
-        .setMessage("删除本页和原图？")
+    Ui.alert(this)
+        .setMessage("您确定要将 1 个页面移至废纸篓吗？")
         .setPositiveButton(
-            "删除",
+            "移到废纸篓",
             (a, b) ->
                 MyFlatApp.of(this)
                     .io
                     .submit(
                         () -> {
                           try {
-                            store.deletePage(pageId);
+                            store.trashPages(Collections.singletonList(pageId));
                             runOnUiThread(this::finish);
-                          } catch (IOException ex) {
+                          } catch (Exception ex) {
                             runOnUiThread(() -> Ui.error(this, ex));
                           }
                         }))

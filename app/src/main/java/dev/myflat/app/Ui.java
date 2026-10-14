@@ -32,19 +32,19 @@ final class Ui {
   }
 
   static LinearLayout column(Context c) {
-    LinearLayout v = new LinearLayout(c);
+    LinearLayout v = new AppearanceLayout(c);
     v.setOrientation(LinearLayout.VERTICAL);
     return v;
   }
 
   static LinearLayout row(Context c) {
-    LinearLayout v = new LinearLayout(c);
+    LinearLayout v = new AppearanceLayout(c);
     v.setGravity(Gravity.CENTER_VERTICAL);
     return v;
   }
 
   static TextView text(Context c, String value, int size, int color) {
-    TextView v = new TextView(c);
+    TextView v = new LocalizedText(c);
     v.setText(value);
     v.setTextSize(size);
     v.setTextColor(color);
@@ -123,7 +123,7 @@ final class Ui {
     text.setGravity(Gravity.CENTER);
     box.addView(spacer(c, 4));
     box.addView(text);
-    box.setContentDescription(label);
+    box.setContentDescription(AppAppearance.text(c, label));
     box.setBackgroundResource(android.R.drawable.list_selector_background);
     box.setOnClickListener(v -> click.run());
     return box;
@@ -146,6 +146,7 @@ final class Ui {
           return insets;
         });
     dialog.setContentView(root);
+    AppAppearance.dialog(dialog, root);
     root.requestApplyInsets();
   }
 
@@ -196,7 +197,7 @@ final class Ui {
     frame.addView(view, new FrameLayout.LayoutParams(dp(c, 24), dp(c, 24), Gravity.CENTER));
     int hitSize = icon.equals("back") ? 56 : 48;
     frame.setLayoutParams(new LinearLayout.LayoutParams(dp(c, hitSize), dp(c, hitSize)));
-    frame.setContentDescription(description);
+    frame.setContentDescription(AppAppearance.text(c, description));
     frame.setBackgroundResource(android.R.drawable.list_selector_background);
     frame.setOnClickListener(v -> click.run());
     return frame;
@@ -220,7 +221,7 @@ final class Ui {
 
   static CheckBox check(Context c, String label, boolean checked) {
     CheckBox b = new CheckBox(c);
-    b.setText(label);
+    b.setText(AppAppearance.text(c, label));
     b.setTextSize(15);
     b.setTextColor(INK);
     b.setButtonTintList(android.content.res.ColorStateList.valueOf(GREEN));
@@ -252,11 +253,44 @@ final class Ui {
         });
   }
 
+  static PopupMenu popup(Context context, View anchor) {
+    return new PopupMenu(context, anchor) {
+      @Override
+      public void show() {
+        Menu menu = getMenu();
+        for (int i = 0; i < menu.size(); i++) {
+          MenuItem item = menu.getItem(i);
+          item.setTitle(AppAppearance.localized(context, item.getTitle()));
+        }
+        super.show();
+      }
+    };
+  }
+
+  static AlertDialog.Builder alert(Context c) {
+    return new AlertDialog.Builder(c) {
+      @Override
+      public AlertDialog create() {
+        AlertDialog dialog = super.create();
+        dialog.setOnShowListener(
+            d -> AppAppearance.dialog(dialog, dialog.getWindow().getDecorView()));
+        return dialog;
+      }
+
+      @Override
+      public AlertDialog show() {
+        AlertDialog dialog = super.show();
+        AppAppearance.dialog(dialog, dialog.getWindow().getDecorView());
+        return dialog;
+      }
+    };
+  }
+
   static void error(Context c, Throwable ex) {
-    new AlertDialog.Builder(c)
-        .setTitle("未能完成")
+    alert(c)
+        .setTitle(AppAppearance.text(c, "未能完成"))
         .setMessage(ex.getMessage() == null ? ex.toString() : ex.getMessage())
-        .setPositiveButton("知道了", null)
+        .setPositiveButton(AppAppearance.text(c, "知道了"), null)
         .show();
   }
 
@@ -264,7 +298,7 @@ final class Ui {
     EditText text = new EditText(c);
     text.setSingleLine(true);
     text.setText(value);
-    text.setHint(hint);
+    text.setHint(AppAppearance.text(c, hint));
     text.setTextSize(16);
     text.setSelectAllOnFocus(true);
     return text;
@@ -279,12 +313,50 @@ final class Ui {
     LinearLayout body = column(c);
     padding(body, 24, 8);
     body.addView(input);
-    new AlertDialog.Builder(c)
-        .setTitle(title)
+    alert(c)
+        .setTitle(AppAppearance.text(c, title))
         .setView(body)
-        .setNegativeButton("取消", null)
-        .setPositiveButton("保存", (d, w) -> save.accept(input.getText().toString()))
+        .setNegativeButton(AppAppearance.text(c, "取消"), null)
+        .setPositiveButton(
+            AppAppearance.text(c, "保存"), (d, w) -> save.accept(input.getText().toString()))
         .show();
+  }
+
+  // This app uses the framework Material theme and framework widgets throughout.
+  @android.annotation.SuppressLint("AppCompatCustomView")
+  static final class LocalizedText extends TextView {
+    private CharSequence source;
+    private boolean restoring;
+
+    LocalizedText(Context c) {
+      super(c);
+    }
+
+    @Override
+    public void setText(CharSequence value, BufferType type) {
+      if (!restoring) source = value;
+      super.setText(
+          AppAppearance.keepsText(this) ? value : AppAppearance.localized(getContext(), value),
+          type);
+    }
+
+    void restoreSource() {
+      restoring = true;
+      super.setText(source, BufferType.NORMAL);
+      restoring = false;
+    }
+  }
+
+  private static final class AppearanceLayout extends LinearLayout {
+    AppearanceLayout(Context c) {
+      super(c);
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+      super.onAttachedToWindow();
+      AppAppearance.watch(this);
+    }
   }
 
   static final class Icon extends View {
@@ -295,6 +367,18 @@ final class Ui {
       super(c);
       int id;
       switch (name) {
+        case "move":
+          id = R.drawable.myflat_ic_move;
+          break;
+        case "gallery":
+          id = R.drawable.myflat_ic_gallery;
+          break;
+        case "rescan":
+          id = R.drawable.myflat_ic_rescan;
+          break;
+        case "handwriting":
+          id = R.drawable.myflat_ic_handwriting;
+          break;
         case "edit":
           id = R.drawable.myflat_ic_edit;
           break;
@@ -389,7 +473,7 @@ final class Ui {
 
     @Override
     protected void onDraw(Canvas canvas) {
-      drawable.setTint(color);
+      drawable.setTint(AppAppearance.color(getContext(), color));
       drawable.setBounds(0, 0, getWidth(), getHeight());
       drawable.draw(canvas);
     }

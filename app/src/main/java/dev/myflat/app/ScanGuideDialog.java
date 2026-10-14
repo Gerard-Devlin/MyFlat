@@ -54,6 +54,7 @@ final class ScanGuideDialog extends Dialog {
     flags.dimAmount = .6f;
     getWindow().setAttributes(flags);
     size();
+    AppAppearance.dialog(this, card);
   }
 
   private void size() {
@@ -110,7 +111,8 @@ final class ScanGuideDialog extends Dialog {
       card.addView(Ui.spacer(c, 24));
       LottieAnimationView tips = animation(c, R.raw.guide_tips);
       TextDelegate delegate = new TextDelegate(tips);
-      for (int i = 0; i < TIPS.length; i++) delegate.setText("TIP" + (i + 1), TIPS[i]);
+      for (int i = 0; i < TIPS.length; i++)
+        delegate.setText("TIP" + (i + 1), AppAppearance.text(c, TIPS[i]));
       tips.setTextDelegate(delegate);
       tips.setRepeatCount(-1);
       tips.setFrame(0);

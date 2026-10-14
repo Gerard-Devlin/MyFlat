@@ -112,7 +112,7 @@ public final class ScanService extends Service {
         } catch (Throwable ex) {
           if (ex instanceof ThreadDeath) throw (ThreadDeath) ex;
           store.fail(
-              page.id, ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage());
+              page, ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage());
           changed("处理未完成，可在页面重试", 0);
         } finally {
           if (result != null && result != source && !result.isRecycled()) result.recycle();

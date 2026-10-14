@@ -26,3 +26,6 @@ gradle/gradle-daemon-jvm.properties
 
 # Locally supplied model weights
 models/**/*.tflite
+
+# Local acceptance photograph
+app/src/androidTest/assets/acceptance.jpg

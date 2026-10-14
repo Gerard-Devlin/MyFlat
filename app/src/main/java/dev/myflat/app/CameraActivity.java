@@ -7,6 +7,7 @@ import android.content.*;
 import android.content.pm.PackageManager;
 import android.graphics.*;
 import android.hardware.camera2.*;
+import android.hardware.camera2.params.MeteringRectangle;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
@@ -37,12 +38,28 @@ public final class CameraActivity extends Activity {
   private Handler cameraHandler;
   private final Handler main = new Handler(Looper.getMainLooper());
   private TextView hint, folderLabel;
-  private ImageView modeButton, flashButton, timerButton, autoButton, recent;
+  private ImageView modeButton,
+      flashButton,
+      timerButton,
+      autoButton,
+      recent,
+      focusMarker,
+      focusZoom;
+  private TextView qrChip;
+  private CameraQrDetector.Detection qrDetection;
+  private long qrSeen;
+  private Bitmap zoomBitmap;
+  private Rect sensorArea;
+  private int afRegions, aeRegions, timerMode, flashMode, scanMode;
+  private float timerSeconds;
+  private String rescanPage;
+  private boolean securityReady;
   private String recentPage;
   private View shutter;
   private Guide guide;
   private ScanSettings options;
   private String documentId, cameraId;
+  private LegacyCapture legacy;
   private long folder;
   private boolean flash = false,
       flashAvailable = false,
@@ -69,6 +86,7 @@ public final class CameraActivity extends Activity {
 
   @Override
   public void onCreate(Bundle state) {
+    AppAppearance.prepare(this);
     super.onCreate(state);
     options = ScanSettings.defaults(this);
     documentId =
@@ -78,9 +96,33 @@ public final class CameraActivity extends Activity {
       captured = state.getInt("captured");
       folder = state.getLong("folder", folder);
     }
+    rescanPage = getIntent().getStringExtra("rescan_page");
+    timerMode = Math.max(0, Math.min(4, getPreferences(MODE_PRIVATE).getInt("timer_mode", 0)));
+    flashMode = Math.max(0, Math.min(3, getPreferences(MODE_PRIVATE).getInt("flash_mode", 0)));
+    scanMode =
+        Math.max(
+            0,
+            Math.min(
+                2, getPreferences(MODE_PRIVATE).getInt("scan_mode", options.doublePage ? 1 : 0)));
+    auto = getPreferences(MODE_PRIVATE).getBoolean("auto", false);
+    if (rescanPage != null) {
+      scanMode = 0;
+      options.doublePage = false;
+      auto = false;
+    }
+    updateTimer();
     guideStep = state == null ? 0 : state.getInt("guide_step");
     shutterSound = getPreferences(MODE_PRIVATE).getBoolean("shutter_sound", false);
     build();
+    Runnable enter =
+        () -> {
+          securityReady = true;
+          if (resumed) resumeCameraFlow();
+        };
+    if (rescanPage != null) FolderSecurity.requirePage(this, rescanPage, enter, this::finish);
+    else if (documentId != null)
+      FolderSecurity.requireDocument(this, documentId, enter, this::finish);
+    else FolderSecurity.require(this, folder, enter, this::finish);
     orientation =
         new OrientationEventListener(this) {
           public void onOrientationChanged(int value) {
@@ -135,7 +177,74 @@ public final class CameraActivity extends Activity {
     Ui.padding(hint, 16, 5);
     frame.addView(hint, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
     preview.setContentDescription("相机取景，点按对焦");
-    preview.setOnClickListener(v -> focus());
+    preview.setOnTouchListener(
+        new View.OnTouchListener() {
+          private float x, y;
+          private boolean held;
+          private final Runnable magnify =
+              () -> {
+                if (getSharedPreferences("preferences", 0).getBoolean("zoom_preview", false)) {
+                  held = true;
+                  showFocusZoom(x, y);
+                }
+              };
+
+          @Override
+          public boolean onTouch(View v, MotionEvent event) {
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+              x = event.getX();
+              y = event.getY();
+              held = false;
+              main.postDelayed(magnify, ViewConfiguration.getLongPressTimeout());
+              return true;
+            }
+            if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+              main.removeCallbacks(magnify);
+              hideFocusZoom();
+              if (!held) {
+                preview.performClick();
+                if (getSharedPreferences("preferences", 0).getBoolean("preview_touch_scan", false))
+                  shootWithTimer();
+                else focus(x, y);
+              }
+              return true;
+            }
+            if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+              main.removeCallbacks(magnify);
+              hideFocusZoom();
+              return true;
+            }
+            return true;
+          }
+        });
+    focusMarker = new ImageView(this);
+    focusMarker.setImageResource(R.drawable.myflat_ic_camera_focus);
+    focusMarker.setImageTintList(android.content.res.ColorStateList.valueOf(0xffbdff00));
+    focusMarker.setVisibility(View.GONE);
+    focusMarker.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+    frame.addView(focusMarker, new FrameLayout.LayoutParams(Ui.dp(this, 32), Ui.dp(this, 32)));
+    focusZoom = new ImageView(this);
+    focusZoom.setScaleType(ImageView.ScaleType.CENTER_CROP);
+    focusZoom.setBackground(Ui.shape(Color.WHITE, Ui.dp(this, 8)));
+    focusZoom.setClipToOutline(true);
+    focusZoom.setVisibility(View.GONE);
+    FrameLayout.LayoutParams zoomParams =
+        new FrameLayout.LayoutParams(
+            Ui.dp(this, 120), Ui.dp(this, 160), Gravity.TOP | Gravity.RIGHT);
+    zoomParams.setMargins(Ui.dp(this, 16), Ui.dp(this, 48), Ui.dp(this, 16), 0);
+    frame.addView(focusZoom, zoomParams);
+    qrChip = Ui.text(this, "", 14, 0xff303030);
+    qrChip.setSingleLine(true);
+    qrChip.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+    qrChip.setGravity(Gravity.CENTER_VERTICAL);
+    qrChip.setBackground(Ui.shape(0xfffdd835, Ui.dp(this, 20)));
+    Ui.padding(qrChip, 16, 8);
+    qrChip.setVisibility(View.GONE);
+    qrChip.setOnClickListener(v -> showQr());
+    FrameLayout.LayoutParams qrParams =
+        new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+    qrParams.setMargins(Ui.dp(this, 24), 0, Ui.dp(this, 24), Ui.dp(this, 24));
+    frame.addView(qrChip, qrParams);
 
     CameraPanel panel = new CameraPanel(this);
     panel.setBackgroundColor(0xfffafafa);
@@ -147,10 +256,19 @@ public final class CameraActivity extends Activity {
             controls,
             "单页扫描",
             () -> {
-              options.doublePage = !options.doublePage;
-              options.save(this);
-              updateControls();
-              guide.invalidate();
+              showMenu(
+                  CameraMenus.scanModes(
+                      this,
+                      scanMode,
+                      mode -> {
+                        scanMode = mode;
+                        options.doublePage = mode == 1;
+                        options.save(this);
+                        getPreferences(MODE_PRIVATE).edit().putInt("scan_mode", mode).apply();
+                        updateControls();
+                        guide.clear();
+                        stableSince = 0;
+                      }));
             });
     flashButton =
         cameraControl(
@@ -161,7 +279,10 @@ public final class CameraActivity extends Activity {
                 Toast.makeText(this, "此相机没有闪光灯", Toast.LENGTH_SHORT).show();
                 return;
               }
-              flash = !flash;
+              // Off → automatic flash → continuous light → capture flash → off.
+              flashMode = flashMode == 0 ? 2 : flashMode == 2 ? 3 : flashMode == 3 ? 1 : 0;
+              getPreferences(MODE_PRIVATE).edit().putInt("flash_mode", flashMode).apply();
+              flash = flashMode == 3;
               updatePreview();
               updateControls();
             });
@@ -170,12 +291,21 @@ public final class CameraActivity extends Activity {
             controls,
             "无定时",
             () -> {
-              int custom = getSharedPreferences("preferences", 0).getInt("timer", 7);
-              timer =
-                  timer == 0
-                      ? 3
-                      : timer == 3 ? 5 : timer == 5 && custom != 3 && custom != 5 ? custom : 0;
+              timerMode = (timerMode + 1) % 5;
+              getPreferences(MODE_PRIVATE).edit().putInt("timer_mode", timerMode).apply();
+              updateTimer();
+              if (timerMode == 4
+                  && !getPreferences(MODE_PRIVATE).getBoolean("custom_timer_notice", false)) {
+                Toast.makeText(this, "您可以在“设置”中设置计时器的时间。", Toast.LENGTH_SHORT).show();
+                getPreferences(MODE_PRIVATE).edit().putBoolean("custom_timer_notice", true).apply();
+              }
               updateControls();
+            });
+    ((View) timerButton.getParent())
+        .setOnLongClickListener(
+            v -> {
+              startActivity(new Intent(this, SettingsActivity.class).putExtra("screen", "timer"));
+              return true;
             });
     autoButton =
         cameraControl(
@@ -183,6 +313,7 @@ public final class CameraActivity extends Activity {
             "自动拍摄关",
             () -> {
               auto = !auto;
+              getPreferences(MODE_PRIVATE).edit().putBoolean("auto", auto).apply();
               armed = true;
               stableSince = 0;
               updateControls();
@@ -246,6 +377,7 @@ public final class CameraActivity extends Activity {
     folderBox.setBackground(border);
     Ui.padding(folderBox, 16, 0);
     folderLabel = Ui.text(this, folderName(), 14, Ui.MUTED);
+    AppAppearance.keepText(folderLabel);
     folderLabel.setSingleLine(true);
     folderLabel.setMaxWidth(Ui.dp(this, 180));
     folderLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -287,26 +419,36 @@ public final class CameraActivity extends Activity {
   private void updateControls() {
     controlState(
         modeButton,
-        options.doublePage
-            ? R.drawable.myflat_ic_camera_page_two
-            : R.drawable.myflat_ic_camera_page_one,
+        scanMode == 2
+            ? R.drawable.myflat_ic_camera_mode_auto
+            : options.doublePage
+                ? R.drawable.myflat_ic_camera_page_two
+                : R.drawable.myflat_ic_camera_page_one,
         false,
-        options.doublePage ? "双页扫描" : "单页扫描");
+        scanMode == 2 ? "自动检测扫描页" : options.doublePage ? "双页扫描" : "单页扫描");
     controlState(
         flashButton,
-        flash ? R.drawable.myflat_ic_camera_flash_on : R.drawable.myflat_ic_camera_flash_off,
-        flash,
-        flash ? "闪光灯开" : "闪光灯关");
+        flashMode == 1
+            ? R.drawable.myflat_ic_camera_flash_on
+            : flashMode == 2
+                ? R.drawable.myflat_ic_camera_flash_auto
+                : flashMode == 3
+                    ? R.drawable.myflat_ic_camera_flash_always
+                    : R.drawable.myflat_ic_camera_flash_off,
+        flashMode != 0,
+        flashMode == 1 ? "闪光灯开" : flashMode == 2 ? "闪光灯自动" : flashMode == 3 ? "闪光灯常亮" : "闪光灯关");
     controlState(
         timerButton,
         timer == 3
             ? R.drawable.myflat_ic_camera_timer_3
-            : timer == 5
-                ? R.drawable.myflat_ic_camera_timer_5
-                : R.drawable.myflat_ic_camera_timer_off,
+            : timer == 4
+                ? R.drawable.myflat_ic_camera_timer_4
+                : timer == 5
+                    ? R.drawable.myflat_ic_camera_timer_5
+                    : R.drawable.myflat_ic_camera_timer_off,
         timer > 0,
-        timer == 0 ? "无定时" : timer + "秒定时");
-    if (timer > 0 && timer != 3 && timer != 5) {
+        timerSeconds == 0 ? "无定时" : timerLabel(timerSeconds) + "秒定时");
+    if (timerMode == 4) {
       Bitmap symbol = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888);
       Canvas image = new Canvas(symbol);
       android.graphics.drawable.Drawable face =
@@ -317,8 +459,8 @@ public final class CameraActivity extends Activity {
       number.setColor(Color.BLACK);
       number.setTextAlign(Paint.Align.CENTER);
       number.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
-      number.setTextSize(timer < 10 ? 38 : 30);
-      image.drawText(Integer.toString(timer), 48, 67, number);
+      number.setTextSize(timerSeconds < 10 && timerSeconds == Math.floor(timerSeconds) ? 38 : 27);
+      image.drawText(timerLabel(timerSeconds), 48, 67, number);
       timerButton.setImageBitmap(symbol);
     }
     controlState(autoButton, R.drawable.myflat_ic_camera_auto, auto, auto ? "自动拍摄开" : "自动拍摄关");
@@ -327,6 +469,10 @@ public final class CameraActivity extends Activity {
 
   private void idleHint() {
     if (hint == null || capturing || SystemClock.elapsedRealtime() < hintUntil) return;
+    if (!getSharedPreferences("preferences", 0).getBoolean("show_scan_guide", true)) {
+      hint.setVisibility(View.GONE);
+      return;
+    }
     if (walkthrough != null && walkthrough.isShowing()) {
       hint.setVisibility(View.GONE);
       return;
@@ -394,12 +540,34 @@ public final class CameraActivity extends Activity {
               getPreferences(MODE_PRIVATE).edit().putBoolean("shutter_sound", selected).apply();
             },
             this::settings,
+            this::resolution,
             () -> Support.show(this),
             this::importImages,
             () -> {
               options.save(this);
               updateControls();
             }));
+  }
+
+  private void resolution() {
+    if (capturing || opening) return;
+    try {
+      PhotoResolution.Configuration config =
+          photoResolutions != null ? photoResolutions : PhotoResolution.discover(this);
+      showMenu(
+          PhotoResolution.picker(
+              this,
+              config,
+              () -> {
+                stableSince = 0;
+                detection = LivePageDetector.Result.searching();
+                guide.clear();
+                close();
+                open();
+              }));
+    } catch (Exception error) {
+      showError(error);
+    }
   }
 
   private void showGuide(int step) {
@@ -425,7 +593,7 @@ public final class CameraActivity extends Activity {
   }
 
   private void enableCamera() {
-    if (!resumed || (walkthrough != null && walkthrough.isShowing())) return;
+    if (!resumed || !securityReady || (walkthrough != null && walkthrough.isShowing())) return;
     if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
       requestPermissions(new String[] {Manifest.permission.CAMERA}, 10);
     else if (preview.isAvailable()) open();
@@ -462,7 +630,7 @@ public final class CameraActivity extends Activity {
     for (int i = 0; i < folders.size(); i++) names[i] = folders.get(i).name;
     names[folders.size()] = "＋ 新建文件夹";
     showMenu(
-        new AlertDialog.Builder(this)
+        Ui.alert(this)
             .setTitle("保存到文件夹")
             .setItems(
                 names,
@@ -479,7 +647,7 @@ public final class CameraActivity extends Activity {
     Ui.padding(body, 24, 8);
     body.addView(name);
     showMenu(
-        new AlertDialog.Builder(this)
+        Ui.alert(this)
             .setTitle("新建文件夹")
             .setView(body)
             .setNegativeButton("取消", null)
@@ -491,11 +659,17 @@ public final class CameraActivity extends Activity {
   }
 
   private void selectFolder(long id) {
-    folder = id;
-    getPreferences(MODE_PRIVATE).edit().putLong("folder", folder).apply();
-    if (documentId != null) MyFlatApp.of(this).store.moveDocument(documentId, folder);
-    folderLabel.setText(folderName());
-    updateRecent();
+    FolderSecurity.require(
+        this,
+        id,
+        () -> {
+          folder = id;
+          getPreferences(MODE_PRIVATE).edit().putLong("folder", folder).apply();
+          if (documentId != null) MyFlatApp.of(this).store.moveDocument(documentId, folder);
+          folderLabel.setText(folderName());
+          updateRecent();
+        },
+        null);
   }
 
   private void library() {
@@ -617,6 +791,8 @@ public final class CameraActivity extends Activity {
     super.onResume();
     resumed = true;
     options = ScanSettings.defaults(this);
+    if (scanMode != 2) options.doublePage = scanMode == 1;
+    updateTimer();
     updateControls();
     if (orientation != null) orientation.enable();
     capturing = false;
@@ -631,10 +807,15 @@ public final class CameraActivity extends Activity {
     detectorFailed = false;
     detection = LivePageDetector.Result.searching();
     hintUntil = 0;
-    if (!getPreferences(MODE_PRIVATE).getBoolean("scan_guide_seen", false)) showGuide(guideStep);
-    else enableCamera();
+    resumeCameraFlow();
     idleHint();
     main.postDelayed(stability, 600);
+  }
+
+  private void resumeCameraFlow() {
+    if (!securityReady || !resumed) return;
+    if (!getPreferences(MODE_PRIVATE).getBoolean("scan_guide_seen", false)) showGuide(guideStep);
+    else enableCamera();
   }
 
   @Override
@@ -642,6 +823,9 @@ public final class CameraActivity extends Activity {
     resumed = false;
     if (orientation != null) orientation.disable();
     main.removeCallbacksAndMessages(null);
+    hideFocusZoom();
+    if (focusMarker != null) focusMarker.setVisibility(View.GONE);
+    if (qrChip != null) qrChip.setVisibility(View.GONE);
     close();
     if (cameraThread != null) {
       cameraThread.quitSafely();
@@ -670,7 +854,7 @@ public final class CameraActivity extends Activity {
       if (grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED) {
         if (preview.isAvailable()) open();
       } else
-        new AlertDialog.Builder(this)
+        Ui.alert(this)
             .setTitle("需要相机权限")
             .setMessage("拍摄书页需要相机权限。你也可以回到资料库导入图片或 PDF。")
             .setPositiveButton(
@@ -706,11 +890,35 @@ public final class CameraActivity extends Activity {
   @SuppressLint("MissingPermission")
   private void open() {
     if (camera != null
+        || legacy != null
         || opening
         || !resumed
+        || !securityReady
         || cameraHandler == null
         || (walkthrough != null && walkthrough.isShowing())) return;
     opening = true;
+    if (getSharedPreferences("preferences", 0).getInt("camera_api", 2) == 1) {
+      try {
+        legacy = new LegacyCapture(this, preview.getSurfaceTexture());
+        standardPhotoSize = legacy.photoSize;
+        photoResolutions = legacy.resolutions;
+        previewSize = legacy.previewSize;
+        sensorOrientation = legacy.orientation;
+        flashAvailable = legacy.flashAvailable;
+        getSharedPreferences("preferences", 0)
+            .edit()
+            .putInt("active_jpeg_width", legacy.photoSize.getWidth())
+            .putInt("active_jpeg_height", legacy.photoSize.getHeight())
+            .apply();
+        updatePreview();
+        transform();
+      } catch (Exception ex) {
+        legacy = null;
+        showError(ex);
+      }
+      opening = false;
+      return;
+    }
     try {
       CameraManager manager = getSystemService(CameraManager.class);
       String fallback = null;
@@ -729,30 +937,27 @@ public final class CameraActivity extends Activity {
       Integer orientation = c.get(CameraCharacteristics.SENSOR_ORIENTATION);
       if (orientation != null) sensorOrientation = orientation;
       flashAvailable = Boolean.TRUE.equals(c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE));
+      sensorArea = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+      Integer maxAf = c.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF);
+      Integer maxAe = c.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE);
+      afRegions = maxAf == null ? 0 : maxAf;
+      aeRegions = maxAe == null ? 0 : maxAe;
       StreamConfigurationMap map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
       if (map == null) throw new IOException("相机不支持图像输出");
-      Size jpeg =
+      standardPhotoSize =
           largest(
               map.getOutputSizes(android.graphics.ImageFormat.JPEG),
               map.getHighResolutionOutputSizes(android.graphics.ImageFormat.JPEG));
-      standardPhotoSize = jpeg;
-      maximumPixelMode = false;
-      if (Build.VERSION.SDK_INT >= 31) {
-        StreamConfigurationMap full =
-            c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION);
-        if (full != null) {
-          Size ultra =
-              largest(
-                  full.getOutputSizes(android.graphics.ImageFormat.JPEG),
-                  full.getHighResolutionOutputSizes(android.graphics.ImageFormat.JPEG));
-          if ((long) ultra.getWidth() * ultra.getHeight()
-              > (long) jpeg.getWidth() * jpeg.getHeight()) {
-            jpeg = ultra;
-            maximumPixelMode = true;
-          }
-        }
-      }
-      previewSize = choose(map.getOutputSizes(SurfaceTexture.class), 1440, 4f / 3);
+      photoResolutions = PhotoResolution.camera2(cameraId, c);
+      PhotoResolution.Option selected = photoResolutions.selected(this);
+      Size jpeg = selected.size;
+      maximumPixelMode = selected.maximum;
+      previewSize =
+          choose(
+              map.getOutputSizes(SurfaceTexture.class),
+              1440,
+              (float) Math.max(jpeg.getWidth(), jpeg.getHeight())
+                  / Math.min(jpeg.getWidth(), jpeg.getHeight()));
       reader =
           ImageReader.newInstance(
               jpeg.getWidth(), jpeg.getHeight(), android.graphics.ImageFormat.JPEG, 2);
@@ -814,6 +1019,7 @@ public final class CameraActivity extends Activity {
 
   private boolean maximumPixelMode;
   private Size standardPhotoSize;
+  private PhotoResolution.Configuration photoResolutions;
 
   static Size largest(Size[]... groups) {
     Size best = null;
@@ -884,6 +1090,23 @@ public final class CameraActivity extends Activity {
   private boolean retryStandardPreview() {
     if (!maximumPixelMode || standardPhotoSize == null || camera == null || !resumed) return false;
     maximumPixelMode = false;
+    if (photoResolutions != null) {
+      for (PhotoResolution.Option option : photoResolutions.options)
+        if (option.size.equals(standardPhotoSize)) {
+          photoResolutions.select(this, option);
+          break;
+        }
+    }
+    runOnUiThread(
+        () ->
+            Toast.makeText(
+                    this,
+                    "相机无法使用该尺寸，已切换为 "
+                        + standardPhotoSize.getWidth()
+                        + " × "
+                        + standardPhotoSize.getHeight(),
+                    Toast.LENGTH_LONG)
+                .show());
     if (session != null) {
       session.close();
       session = null;
@@ -919,51 +1142,237 @@ public final class CameraActivity extends Activity {
   }
 
   private void updatePreview() {
+    if (legacy != null) {
+      try {
+        legacy.flash(flashMode);
+      } catch (RuntimeException ex) {
+        showError(ex);
+      }
+      return;
+    }
     if (session == null || repeating == null || cameraHandler == null) return;
     try {
       repeating.set(
+          CaptureRequest.CONTROL_AE_MODE,
+          flashAvailable && flashMode == 2
+              ? CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
+              : flashAvailable && flashMode == 1
+                  ? CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
+                  : CaptureRequest.CONTROL_AE_MODE_ON);
+      repeating.set(
           CaptureRequest.FLASH_MODE,
-          flash ? CaptureRequest.FLASH_MODE_TORCH : CaptureRequest.FLASH_MODE_OFF);
+          flashAvailable && flashMode == 3
+              ? CaptureRequest.FLASH_MODE_TORCH
+              : CaptureRequest.FLASH_MODE_OFF);
       session.setRepeatingRequest(repeating.build(), null, cameraHandler);
     } catch (CameraAccessException | IllegalStateException ex) {
       showError(ex);
     }
   }
 
+  private static String timerLabel(float seconds) {
+    return seconds == Math.floor(seconds)
+        ? Integer.toString((int) seconds)
+        : Float.toString(seconds);
+  }
+
+  private void updateTimer() {
+    SharedPreferences preferences = getSharedPreferences("preferences", 0);
+    timerSeconds =
+        timerMode == 0
+            ? 0
+            : timerMode == 1
+                ? 3
+                : timerMode == 2
+                    ? 4
+                    : timerMode == 3
+                        ? 5
+                        : preferences.getFloat("timer_seconds", preferences.getInt("timer", 7));
+    timerSeconds = Math.max(0, Math.min(20, timerSeconds));
+    timer = Math.round(timerSeconds);
+  }
+
   private void focus() {
-    if (session == null || repeating == null) return;
+    focus(preview.getWidth() / 2f, preview.getHeight() / 2f);
+  }
+
+  private void focus(float viewX, float viewY) {
+    if (legacy != null) {
+      if (!getSharedPreferences("preferences", 0).getBoolean("explicit_focus", true)) return;
+      legacy.focus(
+          viewX / Math.max(1, preview.getWidth()), viewY / Math.max(1, preview.getHeight()));
+      return;
+    }
+    if (session == null
+        || repeating == null
+        || !getSharedPreferences("preferences", 0).getBoolean("explicit_focus", true)) return;
     try {
+      if (sensorArea != null && preview.getWidth() > 0 && preview.getHeight() > 0) {
+        Matrix inverse = new Matrix();
+        preview.getTransform(new Matrix()).invert(inverse);
+        float[] point = {viewX, viewY};
+        inverse.mapPoints(point);
+        float nx = Math.max(0, Math.min(1, point[0] / preview.getWidth()));
+        float ny = Math.max(0, Math.min(1, point[1] / preview.getHeight()));
+        if (sensorOrientation == 90) {
+          float old = nx;
+          nx = ny;
+          ny = 1 - old;
+        } else if (sensorOrientation == 270) {
+          float old = nx;
+          nx = 1 - ny;
+          ny = old;
+        } else if (sensorOrientation == 180) {
+          nx = 1 - nx;
+          ny = 1 - ny;
+        }
+        Rect region = repeating.get(CaptureRequest.SCALER_CROP_REGION);
+        if (region == null) region = sensorArea;
+        int side = Math.max(1, Math.min(region.width(), region.height()) / 12);
+        int x = region.left + Math.round(nx * region.width()),
+            y = region.top + Math.round(ny * region.height());
+        int left = Math.max(region.left, Math.min(region.right - side, x - side / 2));
+        int top = Math.max(region.top, Math.min(region.bottom - side, y - side / 2));
+        MeteringRectangle[] target = {
+          new MeteringRectangle(
+              new Rect(left, top, left + side, top + side), MeteringRectangle.METERING_WEIGHT_MAX)
+        };
+        if (afRegions > 0) repeating.set(CaptureRequest.CONTROL_AF_REGIONS, target);
+        if (aeRegions > 0) repeating.set(CaptureRequest.CONTROL_AE_REGIONS, target);
+      }
       repeating.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START);
       session.capture(repeating.build(), null, cameraHandler);
       repeating.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
-      temporaryHint("正在对焦", 800);
+      session.setRepeatingRequest(repeating.build(), null, cameraHandler);
+      FrameLayout.LayoutParams marker = (FrameLayout.LayoutParams) focusMarker.getLayoutParams();
+      marker.leftMargin =
+          Math.max(
+              0,
+              Math.min(preview.getWidth() - Ui.dp(this, 32), Math.round(viewX) - Ui.dp(this, 16)));
+      marker.topMargin =
+          Math.max(
+              0,
+              Math.min(preview.getHeight() - Ui.dp(this, 32), Math.round(viewY) - Ui.dp(this, 16)));
+      focusMarker.setLayoutParams(marker);
+      focusMarker.setVisibility(View.VISIBLE);
+      main.postDelayed(() -> focusMarker.setVisibility(View.GONE), 1300);
     } catch (CameraAccessException | IllegalStateException ex) {
       showError(ex);
     }
   }
 
+  private void showFocusZoom(float x, float y) {
+    if (!preview.isAvailable() || capturing || overlayOpen()) return;
+    hideFocusZoom();
+    Bitmap frame = preview.getBitmap();
+    if (frame == null) return;
+    int width = Math.max(1, frame.getWidth() / 4), height = Math.max(1, frame.getHeight() / 4);
+    int left = Math.max(0, Math.min(frame.getWidth() - width, Math.round(x) - width / 2));
+    int top = Math.max(0, Math.min(frame.getHeight() - height, Math.round(y) - height / 2));
+    zoomBitmap = Bitmap.createBitmap(frame, left, top, width, height);
+    if (zoomBitmap != frame) frame.recycle();
+    focusZoom.setImageBitmap(zoomBitmap);
+    focusZoom.setVisibility(View.VISIBLE);
+  }
+
+  private void hideFocusZoom() {
+    if (focusZoom != null) {
+      focusZoom.setVisibility(View.GONE);
+      focusZoom.setImageDrawable(null);
+    }
+    if (zoomBitmap != null) {
+      zoomBitmap.recycle();
+      zoomBitmap = null;
+    }
+  }
+
+  private void showQr() {
+    if (qrDetection == null || capturing) return;
+    CameraQrDetector.Detection target = qrDetection;
+    showMenu(
+        CameraMenus.qr(
+            this,
+            target.title,
+            target.description,
+            () -> {
+              try {
+                startActivity(target.intent());
+              } catch (ActivityNotFoundException error) {
+                Toast.makeText(this, "没有可打开此内容的应用", Toast.LENGTH_SHORT).show();
+              }
+            }));
+  }
+
+  private void updateQr(CameraQrDetector.Detection found) {
+    if (!getSharedPreferences("preferences", 0).getBoolean("qr", true)) {
+      qrDetection = null;
+      qrChip.setVisibility(View.GONE);
+      return;
+    }
+    long now = SystemClock.elapsedRealtime();
+    if (found != null) {
+      qrDetection = found;
+      qrSeen = now;
+      qrChip.setText(found.title + "  ›");
+      qrChip.setContentDescription("二维码：" + found.description);
+      qrChip.setVisibility(View.VISIBLE);
+    } else if (now - qrSeen > 1500) {
+      qrDetection = null;
+      qrChip.setVisibility(View.GONE);
+    }
+  }
+
   private void shootWithTimer() {
-    if (capturing || overlayOpen() || camera == null || session == null) return;
+    if (capturing
+        || overlayOpen()
+        || (legacy == null && (camera == null || session == null))
+        || !securityReady
+        || !FolderSecurity.isAccessible(this, folder)) return;
     capturing = true;
     shutter.setAlpha(.45f);
     focus();
-    if (timer == 0) main.postDelayed(this::captureStill, 300);
-    else countdown(timer);
+    if (timerSeconds == 0) main.postDelayed(this::captureStill, 300);
+    else countdownUntil(SystemClock.elapsedRealtime() + Math.round(timerSeconds * 1000));
   }
 
-  private void countdown(int seconds) {
+  private void countdownUntil(long deadline) {
     if (!resumed) return;
-    if (seconds <= 0) {
+    long remaining = deadline - SystemClock.elapsedRealtime();
+    if (remaining <= 0) {
       captureStill();
       return;
     }
     hint.setVisibility(View.VISIBLE);
-    hint.setText("" + seconds);
-    main.postDelayed(() -> countdown(seconds - 1), 1000);
+    hint.setText(Integer.toString((int) Math.ceil(remaining / 1000.0)));
+    main.postDelayed(() -> countdownUntil(deadline), Math.min(remaining, 100));
   }
 
   private void captureStill() {
-    if (!resumed || camera == null || session == null || reader == null) {
+    if (legacy != null) {
+      if (!resumed || !FolderSecurity.isAccessible(this, folder)) {
+        unlock();
+        return;
+      }
+      int direction = getSharedPreferences("preferences", 0).getInt("direction", 0);
+      int rotation = direction == 1 ? 0 : direction == 2 ? 90 : deviceOrientation;
+      try {
+        if (getSharedPreferences("preferences", 0).getBoolean("haptic", false))
+          shutter.performHapticFeedback(
+              Build.VERSION.SDK_INT >= 30
+                  ? HapticFeedbackConstants.CONFIRM
+                  : HapticFeedbackConstants.KEYBOARD_TAP);
+        legacy.take(rotation, shutterSound, this::saveCaptureBytes);
+      } catch (RuntimeException ex) {
+        showError(ex);
+        unlock();
+      }
+      return;
+    }
+    if (!resumed
+        || camera == null
+        || session == null
+        || reader == null
+        || !FolderSecurity.isAccessible(this, folder)) {
       unlock();
       return;
     }
@@ -974,8 +1383,17 @@ public final class CameraActivity extends Activity {
       request.set(
           CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
       request.set(
+          CaptureRequest.CONTROL_AE_MODE,
+          flashAvailable && flashMode == 2
+              ? CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
+              : flashAvailable && flashMode == 1
+                  ? CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
+                  : CaptureRequest.CONTROL_AE_MODE_ON);
+      request.set(
           CaptureRequest.FLASH_MODE,
-          flash ? CaptureRequest.FLASH_MODE_TORCH : CaptureRequest.FLASH_MODE_OFF);
+          flashAvailable && flashMode == 3
+              ? CaptureRequest.FLASH_MODE_TORCH
+              : CaptureRequest.FLASH_MODE_OFF);
       request.set(CaptureRequest.JPEG_QUALITY, (byte) 100);
       if (Build.VERSION.SDK_INT >= 31 && maximumPixelMode)
         request.set(
@@ -1017,17 +1435,33 @@ public final class CameraActivity extends Activity {
     } catch (IllegalStateException closedReader) {
       return;
     }
+    saveCaptureBytes(bytes);
+  }
+
+  private void saveCaptureBytes(byte[] bytes) {
     ScanSettings settings = ScanSettings.parse(options.json());
+    if (rescanPage != null) settings.doublePage = false;
     MyFlatApp.of(this)
         .io
         .submit(
             () -> {
               File temporary = null;
-              Bitmap bitmap = null;
               try {
                 temporary = File.createTempFile("capture-", ".jpg", getCacheDir());
                 try (OutputStream out = new FileOutputStream(temporary)) {
                   out.write(bytes);
+                }
+                if (rescanPage != null) {
+                  MyFlatApp.of(this).store.replaceScan(rescanPage, temporary, settings);
+                  MyFlatApp.of(this).startProcessing();
+                  runOnUiThread(
+                      () -> {
+                        if (!isDestroyed()) {
+                          setResult(RESULT_OK, new Intent().putExtra("page", rescanPage));
+                          finish();
+                        }
+                      });
+                  return;
                 }
                 if (documentId == null)
                   documentId =
@@ -1057,7 +1491,6 @@ public final class CameraActivity extends Activity {
                 showError(ex);
                 runOnUiThread(this::unlock);
               } finally {
-                if (bitmap != null) bitmap.recycle();
                 if (temporary != null) temporary.delete();
               }
             });
@@ -1078,6 +1511,10 @@ public final class CameraActivity extends Activity {
   }
 
   private void close() {
+    if (legacy != null) {
+      legacy.close();
+      legacy = null;
+    }
     opening = false;
     if (session != null) {
       session.close();
@@ -1108,6 +1545,7 @@ public final class CameraActivity extends Activity {
   @Override
   protected void onDestroy() {
     if (walkthrough != null) walkthrough.dismiss();
+    hideFocusZoom();
     if (cameraMenu != null) cameraMenu.dismiss();
     sound.release();
     super.onDestroy();
@@ -1119,19 +1557,23 @@ public final class CameraActivity extends Activity {
         public void run() {
           if (!resumed) return;
           if (!capturing
+              && securityReady
+              && FolderSecurity.isAccessible(CameraActivity.this, folder)
               && !analysisBusy
               && !detectorFailed
               && !overlayOpen()
               && hasWindowFocus()
               && preview.isAvailable()
-              && session != null
+              && (session != null || legacy != null)
               && analysis != null) {
-            Bitmap frame = preview.getBitmap(288, 384);
+            boolean scanQr = getSharedPreferences("preferences", 0).getBoolean("qr", true);
+            int analysisWidth = scanQr ? 576 : 288, analysisHeight = scanQr ? 768 : 384;
+            Bitmap frame = preview.getBitmap(analysisWidth, analysisHeight);
             if (frame != null) {
-              int[] pixels = new int[288 * 384];
-              frame.getPixels(pixels, 0, 288, 0, 0, 288, 384);
+              int[] pixels = new int[analysisWidth * analysisHeight];
+              frame.getPixels(pixels, 0, analysisWidth, 0, 0, analysisWidth, analysisHeight);
               double delta = 255;
-              if (lastPixels != null) {
+              if (lastPixels != null && lastPixels.length == pixels.length) {
                 delta = 0;
                 for (int i = 0; i < pixels.length; i++) {
                   int a = pixels[i], b = lastPixels[i];
@@ -1147,18 +1589,24 @@ public final class CameraActivity extends Activity {
               analysisBusy = true;
               PreviewAnalysis owner = analysis;
               double movement = delta;
-              boolean dual = options.doublePage;
               float split = options.split;
               int previewOrientation = deviceOrientation;
+              int requestedMode = scanMode;
               owner.executor.execute(
                   () -> {
                     LivePageDetector.Result result = LivePageDetector.Result.searching();
                     Throwable failure = null;
+                    CameraQrDetector.Detection qr = null;
                     try {
                       if (!owner.closed) {
                         if (owner.detector == null)
                           owner.detector = new LivePageDetector(CameraActivity.this);
-                        result = owner.detector.detect(frame, dual, split, previewOrientation);
+                        if (scanQr) qr = CameraQrDetector.detect(frame);
+                        result =
+                            owner.detector.detect(
+                                frame, requestedMode == 1, split, previewOrientation);
+                        if (requestedMode == 2 && (result.pageType == 3 || result.pageType == 4))
+                          result = owner.detector.detect(frame, true, split, previewOrientation);
                       }
                     } catch (Exception | LinkageError error) {
                       failure = error;
@@ -1167,6 +1615,7 @@ public final class CameraActivity extends Activity {
                     }
                     LivePageDetector.Result answer = result;
                     Throwable error = failure;
+                    CameraQrDetector.Detection foundQr = qr;
                     main.post(
                         () -> {
                           if (!resumed || analysis != owner) return;
@@ -1178,7 +1627,9 @@ public final class CameraActivity extends Activity {
                             guide.clear();
                             return;
                           }
-                          if (dual != options.doublePage || split != options.split) return;
+                          if (requestedMode != scanMode || split != options.split) return;
+                          if (requestedMode == 2) options.doublePage = answer.outlines.size() == 2;
+                          updateQr(foundQr);
                           detection = answer;
                           guide.outlines = answer.outlines;
                           guide.invalidate();
@@ -1240,6 +1691,7 @@ public final class CameraActivity extends Activity {
 
     @Override
     protected void onDraw(Canvas canvas) {
+      if (!getSharedPreferences("preferences", 0).getBoolean("show_scan_guide", true)) return;
       paint.setColor(Ui.GREEN);
       paint.setStyle(Paint.Style.STROKE);
       paint.setStrokeWidth(Ui.dp(CameraActivity.this, 2));

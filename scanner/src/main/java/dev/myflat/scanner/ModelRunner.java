@@ -29,7 +29,7 @@ final class ModelRunner {
     ByteBuffer weights = buffer(data.length);
     weights.put(data).rewind();
     try (Interpreter interpreter =
-        new Interpreter(weights, new Interpreter.Options().setNumThreads(4).setUseXNNPACK(true))) {
+        new Interpreter(weights, new Interpreter.Options().setNumThreads(2).setUseXNNPACK(true))) {
       if (interpreter.getInputTensor(0).numBytes() != input.length * 4)
         throw new IOException("Wrong input size for " + model);
       ByteBuffer in = buffer(input.length * 4);

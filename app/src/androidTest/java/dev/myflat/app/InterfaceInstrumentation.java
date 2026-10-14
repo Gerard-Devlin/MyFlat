@@ -23,10 +23,29 @@ public final class InterfaceInstrumentation extends Instrumentation {
   private String document;
   private long folder;
   private File photo;
+  private boolean workflowsOnly, resolutionOnly;
+
+  private void safeOnMain(Runnable action) {
+    java.util.concurrent.atomic.AtomicReference<Throwable> failed =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    super.runOnMainSync(
+        () -> {
+          try {
+            action.run();
+          } catch (Throwable error) {
+            failed.set(error);
+          }
+        });
+    Throwable error = failed.get();
+    if (error instanceof Error) throw (Error) error;
+    if (error != null) throw new RuntimeException(error);
+  }
 
   @Override
   public void onCreate(Bundle args) {
     super.onCreate(args);
+    workflowsOnly = "true".equals(args.getString("workflows_only", "false"));
+    resolutionOnly = "true".equals(args.getString("resolution_only", "false"));
     start();
   }
 
@@ -36,8 +55,26 @@ public final class InterfaceInstrumentation extends Instrumentation {
     int status = Activity.RESULT_OK;
     try {
       context = getTargetContext();
+      context
+          .getSharedPreferences("appearance", 0)
+          .edit()
+          .putString("language", "zh-CN")
+          .putInt("night_mode", 1)
+          .commit();
       launch(MainActivity.class, new Intent());
       store = MyFlatApp.of(context).store;
+      if (resolutionOnly) {
+        new WorkflowChecks(this).resolutionChecksOnly();
+        result.putString("stream", "Resolution checks passed");
+        finish(Activity.RESULT_OK, result);
+        return;
+      }
+      if (workflowsOnly) {
+        new WorkflowChecks(this).run();
+        result.putString("stream", "Workflow checks passed");
+        finish(Activity.RESULT_OK, result);
+        return;
+      }
       for (DocumentStore.Document old : store.documents(0, "Interface test ", false))
         if (old.title.matches("Interface test [0-9a-f-]{36}( restored)?"))
           store.permanentlyDelete(old.id);
@@ -67,14 +104,19 @@ public final class InterfaceInstrumentation extends Instrumentation {
       testCameraCapture();
       testBackup(pageId, unique);
       testPageManagement(pageId);
+      new WorkflowChecks(this).run();
       result.putString(
           "stream", new JSONObject().put("status", "passed").put("checks", checks).toString(2));
 
     } catch (Throwable error) {
+      try {
+        capture("failure", top());
+      } catch (Throwable ignored) {
+      }
       result.putString("stream", android.util.Log.getStackTraceString(error));
       status = Activity.RESULT_CANCELED;
     } finally {
-      runOnMainSync(
+      safeOnMain(
           () -> {
             for (Activity a : activities) if (!a.isFinishing()) a.finish();
           });
@@ -103,7 +145,7 @@ public final class InterfaceInstrumentation extends Instrumentation {
     String previous = prefs.getString("library", null);
     try {
       prefs.edit().remove("library").commit();
-      runOnMainSync(() -> click(main.getWindow().getDecorView(), "更多"));
+      safeOnMain(() -> click(main.getWindow().getDecorView(), "更多"));
       waitForIdleSync();
       SystemClock.sleep(250);
       capture("menu-probe", top());
@@ -111,11 +153,11 @@ public final class InterfaceInstrumentation extends Instrumentation {
           find(top(), "导入") != null && find(top(), "创建 ZIP") != null && find(top(), "创建文本") == null,
           "More sheet contains the five enabled library actions");
       capture("library-more", top());
-      runOnMainSync(() -> click(top(), "编辑菜单"));
+      safeOnMain(() -> click(top(), "编辑菜单"));
       waitForIdleSync();
       capture("menu-edit", top());
       require(find(top(), "动作设置") != null, "Menu customization opens as a full screen");
-      runOnMainSync(
+      safeOnMain(
           () -> {
             click(top(), "改名");
             click(top(), "完成");
@@ -133,7 +175,7 @@ public final class InterfaceInstrumentation extends Instrumentation {
   private void testGuide() throws Exception {
     Activity owner = activities.get(0);
     ScanGuideDialog[] guide = new ScanGuideDialog[1];
-    runOnMainSync(
+    safeOnMain(
         () -> {
           guide[0] = new ScanGuideDialog(owner, 0, () -> {});
           guide[0].show();
@@ -142,7 +184,7 @@ public final class InterfaceInstrumentation extends Instrumentation {
     for (int i = 0; i < 5; i++) {
       SystemClock.sleep(250);
       capture("guide-" + i, guide[0].getWindow().getDecorView());
-      runOnMainSync(
+      safeOnMain(
           () -> click(guide[0].getWindow().getDecorView(), guide[0].step() == 4 ? "关闭" : "下一步"));
       waitForIdleSync();
     }
@@ -155,7 +197,7 @@ public final class InterfaceInstrumentation extends Instrumentation {
         (EditorActivity) launch(EditorActivity.class, new Intent().putExtra("page", id));
     waitUntil(() -> field(editor, "canvas") != null, 10000);
     PageCanvas view = (PageCanvas) field(editor, "canvas");
-    runOnMainSync(
+    safeOnMain(
         () -> {
           try {
             Field scale = PageCanvas.class.getDeclaredField("scale");
@@ -170,13 +212,13 @@ public final class InterfaceInstrumentation extends Instrumentation {
     Bitmap detail = (Bitmap) field(view, "detail");
     require(detail.getWidth() > 500, "Zoom reads visible detail from the full-resolution JPEG");
     capture("editor-zoom", editor.getWindow().getDecorView());
-    runOnMainSync(() -> click(editor.getWindow().getDecorView(), "裁剪"));
+    safeOnMain(() -> click(editor.getWindow().getDecorView(), "裁剪"));
     waitForIdleSync();
     capture("crop", editor.getWindow().getDecorView());
-    runOnMainSync(() -> click(editor.getWindow().getDecorView(), "比例：自定义  ⌄"));
+    safeOnMain(() -> click(editor.getWindow().getDecorView(), "比例：自订"));
     waitForIdleSync();
     capture("crop-ratios", editor.getWindow().getDecorView());
-    runOnMainSync(
+    safeOnMain(
         () -> {
           click(editor.getWindow().getDecorView(), "A4比例");
           click(editor.getWindow().getDecorView(), "完成");
@@ -190,17 +232,28 @@ public final class InterfaceInstrumentation extends Instrumentation {
     require(
         store.page(id).height > 2400,
         "Crop saves at source resolution instead of preview resolution");
-    SystemClock.sleep(400);
+    waitUntil(
+        () ->
+            field(editor, "canvas") != null
+                && ((PageCanvas) field(editor, "canvas")).mode() == PageCanvas.Mode.VIEW
+                && find(editor.getWindow().getDecorView(), "更多") != null,
+        15000);
     waitForIdleSync();
-    runOnMainSync(() -> click(editor.getWindow().getDecorView(), "更多"));
+    safeOnMain(() -> click(editor.getWindow().getDecorView(), "更多"));
     waitForIdleSync();
     SystemClock.sleep(250);
-    runOnMainSync(() -> click(top(), "擦除"));
+    safeOnMain(() -> click(top(), "擦除"));
+    waitUntil(
+        () ->
+            field(editor, "canvas") != null
+                && ((PageCanvas) field(editor, "canvas")).mode() == PageCanvas.Mode.ERASE
+                && find(editor.getWindow().getDecorView(), "完成") != null,
+        30000);
     waitForIdleSync();
     PageCanvas erase = (PageCanvas) field(editor, "canvas");
     int width = store.page(id).width, height = store.page(id).height;
     String before = hash(store.file(store.page(id).result));
-    runOnMainSync(
+    safeOnMain(
         () -> {
           long now = SystemClock.uptimeMillis();
           MotionEvent down =
@@ -222,7 +275,7 @@ public final class InterfaceInstrumentation extends Instrumentation {
     require(
         hash(photo).equals(hash(store.file(store.page(id).original))),
         "Crop and brush editing preserve the untouched original");
-    runOnMainSync(editor::finish);
+    safeOnMain(editor::finish);
     waitForIdleSync();
   }
 
@@ -238,12 +291,12 @@ public final class InterfaceInstrumentation extends Instrumentation {
     require(
         find(importer.getWindow().getDecorView(), "自动裁剪") != null,
         "Import preview includes processing choices");
-    runOnMainSync(() -> click(importer.getWindow().getDecorView(), "  排序"));
+    safeOnMain(() -> click(importer.getWindow().getDecorView(), "排序"));
     waitForIdleSync();
     capture("import-order", top());
     require(find(top(), "第 1 页，长按移动") != null, "Import ordering uses draggable page thumbnails");
-    runOnMainSync(() -> click(top(), "完成"));
-    runOnMainSync(importer::finish);
+    safeOnMain(() -> click(top(), "完成"));
+    safeOnMain(importer::finish);
     waitForIdleSync();
   }
 
@@ -259,12 +312,12 @@ public final class InterfaceInstrumentation extends Instrumentation {
                 .putExtra("format", "PDF"));
     waitForIdleSync();
     capture("pdf-prepare", export.getWindow().getDecorView());
-    runOnMainSync(() -> click(export.getWindow().getDecorView(), "色彩模式  "));
+    safeOnMain(() -> click(export.getWindow().getDecorView(), "色彩模式  "));
     waitForIdleSync();
     capture("pdf-settings", top());
     require(find(top(), "最高") != null, "PDF defaults to the highest image quality");
-    runOnMainSync(() -> click(top(), "关闭"));
-    runOnMainSync(export::finish);
+    safeOnMain(() -> click(top(), "关闭"));
+    safeOnMain(export::finish);
     waitForIdleSync();
   }
 
@@ -274,7 +327,7 @@ public final class InterfaceInstrumentation extends Instrumentation {
     require(
         find(settings.getWindow().getDecorView(), "自定义定时器") != null,
         "Camera preferences are available in the settings hierarchy");
-    runOnMainSync(settings::finish);
+    safeOnMain(settings::finish);
     waitForIdleSync();
   }
 
@@ -294,7 +347,7 @@ public final class InterfaceInstrumentation extends Instrumentation {
       waitUntil(() -> field(camera, "session") != null, 15000);
       android.media.ImageReader reader = (android.media.ImageReader) field(camera, "reader");
       long expected = (long) reader.getWidth() * reader.getHeight();
-      runOnMainSync(
+      safeOnMain(
           () -> {
             try {
               java.lang.reflect.Method shoot =
@@ -322,7 +375,7 @@ public final class InterfaceInstrumentation extends Instrumentation {
       String completed = captured;
       waitUntil(() -> "ready".equals(store.pages(completed).get(0).status), 30000);
     } finally {
-      runOnMainSync(camera::finish);
+      safeOnMain(camera::finish);
       waitForIdleSync();
       if (captured != null) store.permanentlyDelete(captured);
       if (previous == null) settings.edit().remove("scan").commit();
@@ -523,7 +576,7 @@ public final class InterfaceInstrumentation extends Instrumentation {
   }
 
   private void capture(String label, View root) {
-    runOnMainSync(
+    safeOnMain(
         () -> {
           Bitmap image =
               Bitmap.createBitmap(root.getWidth(), root.getHeight(), Bitmap.Config.ARGB_8888);

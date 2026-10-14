@@ -20,6 +20,22 @@ public final class SmokeInstrumentation extends Instrumentation {
   private Context context;
   private DocumentStore store;
 
+  private void safeOnMain(Runnable action) {
+    java.util.concurrent.atomic.AtomicReference<Throwable> failed =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    super.runOnMainSync(
+        () -> {
+          try {
+            action.run();
+          } catch (Throwable error) {
+            failed.set(error);
+          }
+        });
+    Throwable error = failed.get();
+    if (error instanceof Error) throw (Error) error;
+    if (error != null) throw new RuntimeException(error);
+  }
+
   @Override
   public void onCreate(Bundle args) {
     super.onCreate(args);
@@ -32,13 +48,26 @@ public final class SmokeInstrumentation extends Instrumentation {
     JSONObject json = new JSONObject();
     try {
       context = getTargetContext();
+      context
+          .getSharedPreferences("appearance", 0)
+          .edit()
+          .putString("language", "zh-CN")
+          .putInt("night_mode", 1)
+          .commit();
+      store = MyFlatApp.of(context).store;
+      for (DocumentStore.Folder previous : store.folders())
+        if (previous.name.equals("集成测试文件夹")) {
+          for (DocumentStore.Document old : store.documents(previous.id, "MyFlat 集成验收", false))
+            if (old.title.equals("MyFlat 集成验收")) store.permanentlyDelete(old.id);
+          if (store.documents(previous.id, "", false).isEmpty()) store.deleteFolder(previous.id);
+        }
       Activity activity =
           startActivitySync(
               new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
       waitForIdleSync();
       store = MyFlatApp.of(context).store;
       runTests();
-      runOnMainSync(activity::recreate);
+      safeOnMain(activity::recreate);
       json.put("status", "passed")
           .put("checks", checks)
           .put("android", Build.VERSION.SDK_INT)
@@ -60,7 +89,7 @@ public final class SmokeInstrumentation extends Instrumentation {
   }
 
   private void runTests() throws Exception {
-    runOnMainSync(
+    safeOnMain(
         () -> {
           Bitmap launcher = Bitmap.createBitmap(216, 216, Bitmap.Config.ARGB_8888);
           android.graphics.drawable.Drawable icon =
@@ -143,14 +172,14 @@ public final class SmokeInstrumentation extends Instrumentation {
     long folder = store.createFolder("集成测试文件夹");
     String doc = store.createDocument(folder, "MyFlat 集成验收");
     ScanSettings raw = new ScanSettings();
-    raw.dewarp = raw.enhance = raw.fingers = false;
+    raw.dewarp = raw.enhance = raw.fingers = raw.straighten = false;
     String first = store.addPage(doc, fixture, raw), second = store.addPage(doc, fixture, raw);
     require(store.pages(doc).size() == 2, "两页导入与原图落盘");
     DocumentStore.Page claimed = store.nextJob();
     require(claimed != null, "SQLite 队列领取任务");
     store.recoverQueue();
     require("queued".equals(store.page(claimed.id).status), "进程中断后任务恢复为待处理");
-    runOnMainSync(() -> MyFlatApp.of(context).startProcessing());
+    safeOnMain(() -> MyFlatApp.of(context).startProcessing());
     waitReady(doc, 45000);
     require(
         "ready".equals(store.page(first).status) && "ready".equals(store.page(second).status),
@@ -289,7 +318,7 @@ public final class SmokeInstrumentation extends Instrumentation {
     String scanned = store.createDocument(1, "MyFlat 扫描样张");
     ScanSettings learned = new ScanSettings();
     String scanPage = store.addPage(scanned, fixture, learned);
-    runOnMainSync(() -> MyFlatApp.of(context).startProcessing());
+    safeOnMain(() -> MyFlatApp.of(context).startProcessing());
     waitReady(scanned, 90000);
     DocumentStore.Page result = store.page(scanPage);
     require(result.width > 500 && result.width < 900 && result.height > 900, "完整书页扫描输出尺寸正确");
@@ -370,7 +399,7 @@ public final class SmokeInstrumentation extends Instrumentation {
     waitForIdleSync();
     java.lang.reflect.Field dialogField = CameraActivity.class.getDeclaredField("walkthrough");
     dialogField.setAccessible(true);
-    runOnMainSync(
+    safeOnMain(
         () -> {
           try {
             ScanGuideDialog guide = (ScanGuideDialog) dialogField.get(camera);
@@ -428,14 +457,14 @@ public final class SmokeInstrumentation extends Instrumentation {
             throw new AssertionError(ex);
           }
         });
-    runOnMainSync(camera::finish);
+    safeOnMain(camera::finish);
     waitForIdleSync();
     CameraActivity again =
         (CameraActivity)
             startActivitySync(
                 new Intent(context, CameraActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
     waitForIdleSync();
-    runOnMainSync(
+    safeOnMain(
         () -> {
           try {
             require(dialogField.get(again) == null, "第二次进入不重复显示首次引导");

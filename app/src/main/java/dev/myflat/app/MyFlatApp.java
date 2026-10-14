@@ -15,6 +15,7 @@ public final class MyFlatApp extends Application {
     super.onCreate();
     store = new DocumentStore(this);
     store.recoverQueue();
+    FolderSecurity.install(this);
     registerActivityLifecycleCallbacks(
         new ActivityLifecycleCallbacks() {
           public void onActivityStarted(Activity a) {
@@ -25,15 +26,25 @@ public final class MyFlatApp extends Application {
             visibleActivities = Math.max(0, visibleActivities - 1);
           }
 
-          public void onActivityCreated(Activity a, Bundle b) {}
+          public void onActivityPreCreated(Activity a, Bundle b) {
+            AppAppearance.prepare(a);
+          }
 
-          public void onActivityResumed(Activity a) {}
+          public void onActivityCreated(Activity a, Bundle b) {
+            AppAppearance.watch(a.getWindow().getDecorView());
+          }
+
+          public void onActivityResumed(Activity a) {
+            AppAppearance.resumed(a);
+          }
 
           public void onActivityPaused(Activity a) {}
 
           public void onActivitySaveInstanceState(Activity a, Bundle b) {}
 
-          public void onActivityDestroyed(Activity a) {}
+          public void onActivityDestroyed(Activity a) {
+            AppAppearance.forgotten(a);
+          }
         });
   }
 

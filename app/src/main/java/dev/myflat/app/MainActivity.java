@@ -22,6 +22,11 @@ public final class MainActivity extends Activity {
   private long folderId = 0;
   private boolean trash = false, selecting = false;
   private final Set<String> selected = new LinkedHashSet<>();
+  private final Set<Long> selectedFolders = new LinkedHashSet<>();
+  private Integer colorFilter;
+  private boolean coverPicking, folderGateRequested;
+  private ScrollView currentScroll;
+  private String renderedLocation = "";
   private File pendingExport;
   private boolean receiverRegistered;
   private final BroadcastReceiver changed =
@@ -40,13 +45,28 @@ public final class MainActivity extends Activity {
 
   @Override
   public void onCreate(Bundle state) {
+    AppAppearance.prepare(this);
     super.onCreate(state);
     trash = getIntent().getBooleanExtra("trash", false);
     store = MyFlatApp.of(this).store;
+    MyFlatApp.of(this)
+        .io
+        .submit(
+            () -> {
+              try {
+                store.pruneTrash();
+              } catch (IOException ignored) {
+              }
+            });
     if (state != null) {
       documentId = state.getString("document");
       folderId = state.getLong("folder");
       trash = state.getBoolean("trash");
+      selecting = state.getBoolean("selecting");
+      ArrayList<String> selection = state.getStringArrayList("selected");
+      if (selection != null) selected.addAll(selection);
+      long[] folderSelection = state.getLongArray("selectedFolders");
+      if (folderSelection != null) for (long id : folderSelection) selectedFolders.add(id);
       String path = state.getString("export");
       if (path != null) pendingExport = new File(path);
     }
@@ -104,6 +124,10 @@ public final class MainActivity extends Activity {
     out.putString("document", documentId);
     out.putLong("folder", folderId);
     out.putBoolean("trash", trash);
+    out.putBoolean("selecting", selecting);
+    out.putStringArrayList("selected", new ArrayList<>(selected));
+    out.putLongArray(
+        "selectedFolders", selectedFolders.stream().mapToLong(Long::longValue).toArray());
     if (pendingExport != null) out.putString("export", pendingExport.getPath());
   }
 
@@ -115,6 +139,7 @@ public final class MainActivity extends Activity {
     documentId = intent.getStringExtra("document");
     selecting = false;
     selected.clear();
+    selectedFolders.clear();
     trash = intent.getBooleanExtra("trash", false);
     refresh();
     consumeImport();
@@ -127,31 +152,62 @@ public final class MainActivity extends Activity {
   }
 
   private List<DocumentStore.Page> visiblePages() {
-    if (documentId != null) return store.pages(documentId);
-    List<DocumentStore.Document> docs = store.documents(folderId, search, false);
-    Collections.reverse(docs);
     List<DocumentStore.Page> pages = new ArrayList<>();
-    for (DocumentStore.Document doc : docs) pages.addAll(store.pages(doc.id));
+    if (documentId != null) pages.addAll(store.pages(documentId));
+    else {
+      List<DocumentStore.Document> docs = store.documents(folderId, "", false);
+      Collections.reverse(docs);
+      for (DocumentStore.Document doc : docs) pages.addAll(store.pages(doc.id));
+    }
+    int sort = getPreferences(0).getInt("pages_sort_" + folderId, 3);
+    if (sort < 2) pages.sort(Comparator.comparingLong(p -> p.created));
+    if (sort == 0 || sort == 2) Collections.reverse(pages);
+    if (colorFilter != null) pages.removeIf(p -> p.colorTag != colorFilter);
     return pages;
   }
 
   private int coverHeight() {
     float width =
         getResources().getDisplayMetrics().widthPixels / getResources().getDisplayMetrics().density;
-    return Ui.dp(this, (width - 32) / 3 * 1.4142f);
+    return Ui.dp(this, ((width - 16) / 3 - 8) * 1.4142f);
   }
 
   private void refresh() {
     if (isFinishing() || isDestroyed()) return;
+    if (folderId > 0 && !FolderSecurity.isAccessible(this, folderId)) {
+      if (!folderGateRequested) {
+        folderGateRequested = true;
+        root = Ui.root(this);
+        FolderSecurity.require(
+            this,
+            folderId,
+            () -> {
+              folderGateRequested = false;
+              refresh();
+            },
+            () -> {
+              folderGateRequested = false;
+              folderId = 0;
+              documentId = null;
+              refresh();
+            });
+      }
+      return;
+    }
+    String location = folderId + ":" + documentId + ":" + trash;
+    int scrollY =
+        location.equals(renderedLocation) && currentScroll != null ? currentScroll.getScrollY() : 0;
+    renderedLocation = location;
     DocumentStore.Document document = documentId == null ? null : store.document(documentId);
     if (documentId != null && document == null) documentId = null;
     root = Ui.root(this);
     LinearLayout header = Ui.row(this);
     Ui.padding(header, 0, 0);
-    header.addView(Ui.iconButton(this, "back", "返回", this::back));
+    header.addView(
+        Ui.iconButton(this, selecting ? "close" : "back", selecting ? "取消选择" : "返回", this::back));
     String title =
         selecting
-            ? "已选 " + selected.size() + " 页"
+            ? (selectionCount() == 0 ? "请选择" : "已选择" + selectionCount())
             : document != null
                 ? document.title
                 : trash ? "回收站" : folderId > 0 ? folderName() : "MyFlat 库";
@@ -168,31 +224,55 @@ public final class MainActivity extends Activity {
       header.addView(brand, hp);
     } else {
       TextView heading = Ui.text(this, title, 20, Ui.INK);
+      AppAppearance.keepText(heading);
       heading.setSingleLine(true);
       heading.setEllipsize(android.text.TextUtils.TruncateAt.END);
       heading.setGravity(Gravity.CENTER_VERTICAL);
+      if (folderId > 0 && !selecting && !trash) {
+        heading.setBackgroundResource(R.drawable.myflat_dash_underline);
+        heading.setOnClickListener(v -> renameCurrent());
+      }
       header.addView(heading, hp);
     }
-    if (!trash) header.addView(Ui.iconButton(this, "search", "搜索文档名称", this::search));
-    View toolbarMenu = Ui.iconButton(this, "menu", "更多", () -> {});
-    toolbarMenu.setOnClickListener(v -> toolbarMenu(v));
-    header.addView(toolbarMenu);
+    if (!trash && !selecting) header.addView(Ui.iconButton(this, "search", "搜索", this::search));
+    if (trash && !selecting) {
+      header.addView(
+          headerText(
+              "选择",
+              () -> {
+                selecting = true;
+                refresh();
+              }));
+      header.addView(headerText("清除", this::emptyTrash));
+    } else {
+      View toolbarMenu = Ui.iconButton(this, "menu", "更多", () -> {});
+      toolbarMenu.setOnClickListener(v -> toolbarMenu(v));
+      header.addView(toolbarMenu);
+    }
     header.setElevation(Ui.dp(this, 1));
     root.addView(header);
+    if (trash) {
+      TextView notice = Ui.text(this, "回收站中的项目将在 30 天后完全删除。", 14, Ui.INK);
+      Ui.padding(notice, 12, 12);
+      root.addView(notice);
+    }
     FrameLayout center = new FrameLayout(this);
     boolean folders = folderId == 0 && documentId == null && !trash && search.isEmpty();
-    center.setBackgroundColor(folders || trash ? Color.WHITE : Ui.PAPER);
+    center.setBackgroundColor(folders || trash ? Color.WHITE : 0xfff5f5f5);
     root.addView(center, new LinearLayout.LayoutParams(-1, 0, 1));
     ScrollView scroll = new ScrollView(this);
+    currentScroll = scroll;
+    scroll.post(() -> scroll.scrollTo(0, scrollY));
     scroll.setFillViewport(true);
     center.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
     LinearLayout content = Ui.column(this);
-    Ui.padding(content, 8, folders ? 4 : 24);
+    Ui.padding(content, 8, folders || trash ? 0 : 16);
     scroll.addView(content);
     if (folders) folders(content);
-    else if (trash || (folderId == 0 && !search.isEmpty())) documents(content);
+    else if (trash) trashGrid(content);
+    else if (folderId == 0 && !search.isEmpty()) documents(content);
     else pages(content);
-    if (!trash) {
+    if (!trash && !selecting) {
       FrameLayout fab = new FrameLayout(this);
       fab.setBackground(Ui.shape(Ui.GREEN, Ui.dp(this, 28)));
       fab.setElevation(Ui.dp(this, 4));
@@ -220,15 +300,8 @@ public final class MainActivity extends Activity {
     LinearLayout bar = Ui.row(this);
     Ui.padding(bar, 8, 0);
     if (trash) {
-      addAction(
-          bar,
-          "folder",
-          "全部恢复",
-          () -> {
-            for (DocumentStore.Document d : store.documents(0, "", true)) store.trash(d.id, false);
-            refresh();
-          });
-      addAction(bar, "trash", "清空回收站", this::emptyTrash);
+      addAction(bar, "restore", "恢复", this::restoreSelected);
+      addAction(bar, "trash", "删除", this::deleteSelected);
     } else {
       ActionMenus.toolbar(this, bar, folders ? "library" : "pages", menuItems(), this::refresh);
     }
@@ -241,37 +314,22 @@ public final class MainActivity extends Activity {
   }
 
   private void createFolder() {
-    Ui.rename(
-        this,
-        "新建文件夹",
-        "",
-        name -> {
-          store.createFolder(name);
-          refresh();
-        });
+    LibraryInputDialog.createFolder(this, id -> refresh());
   }
 
   private void deleteAction() {
-    if (documentId != null || folderId > 0) {
-      selecting = true;
-      refresh();
-      Toast.makeText(this, "长按选择需要删除的页面", Toast.LENGTH_SHORT).show();
-    } else {
-      List<DocumentStore.Folder> folders = store.folders();
-      new AlertDialog.Builder(this)
-          .setTitle("选择文件夹")
-          .setItems(
-              folders.stream().map(f -> f.name).toArray(String[]::new),
-              (d, w) -> folderMenu(folders.get(w)))
-          .show();
-    }
+    selecting = true;
+    selected.clear();
+    selectedFolders.clear();
+    refresh();
   }
 
   private void folders(LinearLayout content) {
     List<DocumentStore.Folder> folders = new ArrayList<>(store.folders());
-    int sort = getPreferences(0).getInt("folder_sort", 3);
-    if (sort < 2) folders.sort(java.util.Comparator.comparing(f -> f.name));
-    if (sort == 1 || sort == 2) Collections.reverse(folders);
+    int sort = getPreferences(0).getInt("folder_sort", 2);
+    if (sort < 2) folders.sort(Comparator.comparing(f -> f.name));
+    else if (sort >= 4) folders.sort(Comparator.comparingLong(f -> f.updated));
+    if (sort == 1 || sort == 3 || sort == 5) Collections.reverse(folders);
     LinearLayout row = null;
     for (int i = 0; i < folders.size(); i++) {
       if (i % 3 == 0) {
@@ -281,17 +339,24 @@ public final class MainActivity extends Activity {
       }
       DocumentStore.Folder folder = folders.get(i);
       LinearLayout card = Ui.column(this);
-      Ui.padding(card, 4, 8);
+      card.setPadding(Ui.dp(this, 4), Ui.dp(this, 4), Ui.dp(this, 4), Ui.dp(this, 16));
       FrameLayout cover = new FrameLayout(this);
       android.graphics.drawable.GradientDrawable border = Ui.shape(0xfff5f5f5, Ui.dp(this, 6));
       border.setStroke(Ui.dp(this, 1), 0xffeeeeee);
       cover.setBackground(border);
-      List<DocumentStore.Document> docs = store.documents(folder.id, "", false);
+      boolean locked = FolderSecurity.locked(this, folder.id);
+      List<DocumentStore.Document> docs =
+          locked ? Collections.emptyList() : store.documents(folder.id, "", false);
       int count = 0;
       String thumbnail = null;
       for (DocumentStore.Document doc : docs) {
         count += doc.count;
         if (thumbnail == null) thumbnail = doc.cover;
+      }
+      if (!locked && folder.cover != null && !folder.cover.isEmpty()) {
+        DocumentStore.Page custom = store.page(folder.cover);
+        if (custom != null && custom.deleted == 0)
+          thumbnail = "ready".equals(custom.status) ? custom.result : custom.original;
       }
       if (thumbnail != null) {
         ImageView image = new ImageView(this);
@@ -308,8 +373,15 @@ public final class MainActivity extends Activity {
         cover.addView(
             empty, new FrameLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 40), Gravity.CENTER));
       }
+      if (locked) {
+        TextView lock = Ui.text(this, "●", 24, 0xffbdbdbd);
+        lock.setGravity(Gravity.CENTER);
+        cover.addView(lock, new FrameLayout.LayoutParams(-1, -1));
+      }
+      if (selecting) addSelection(cover, selectedFolders.contains(folder.id), true);
       card.addView(cover, new LinearLayout.LayoutParams(-1, coverHeight()));
       TextView name = Ui.bold(this, folder.name, 14);
+      AppAppearance.keepText(name);
       name.setMaxLines(2);
       Ui.padding(name, 0, 8);
       card.addView(name);
@@ -317,18 +389,27 @@ public final class MainActivity extends Activity {
       Ui.Icon pages = new Ui.Icon(this, "page_count");
       pages.color = 0xffe1e1e1;
       detail.addView(pages, new LinearLayout.LayoutParams(Ui.dp(this, 16), Ui.dp(this, 16)));
-      detail.addView(Ui.text(this, " " + count, 12, 0xff808080));
+      detail.addView(Ui.text(this, locked ? "" : " " + count, 12, 0xff808080));
       card.addView(detail);
       card.setContentDescription(folder.name + "，" + count + "页");
       card.setOnClickListener(
           v -> {
-            folderId = folder.id;
-            documentId = null;
-            refresh();
+            if (selecting) {
+              if (!selectedFolders.add(folder.id)) selectedFolders.remove(folder.id);
+              refresh();
+            } else openFolder(folder.id);
           });
       card.setOnLongClickListener(
           v -> {
-            folderMenu(folder);
+            FolderSecurity.require(
+                this,
+                folder.id,
+                () -> {
+                  selecting = true;
+                  selectedFolders.add(folder.id);
+                  refresh();
+                },
+                () -> {});
             return true;
           });
       row.addView(card, new LinearLayout.LayoutParams(0, -2, 1));
@@ -421,7 +502,7 @@ public final class MainActivity extends Activity {
       }
       DocumentStore.Page page = pages.get(i);
       LinearLayout card = Ui.column(this);
-      Ui.padding(card, 5, 8);
+      Ui.padding(card, 4, 4);
       FrameLayout cover = new FrameLayout(this);
       cover.setBackground(Ui.shape(selected.contains(page.id) ? 0xffb5eee4 : 0xffeeeeee, 0));
       ImageView image = new ImageView(this);
@@ -439,23 +520,33 @@ public final class MainActivity extends Activity {
         overlay.setBackgroundColor(0xaa182624);
         cover.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
       }
-      if (selected.contains(page.id)) {
-        TextView check = Ui.text(this, "✓", 22, Ui.GREEN);
-        check.setBackgroundColor(Color.WHITE);
-        cover.addView(
-            check,
+      if (page.colorTag != 0) {
+        View tag = new View(this);
+        tag.setBackground(Ui.shape(page.colorTag, Ui.dp(this, 4)));
+        FrameLayout.LayoutParams tp =
             new FrameLayout.LayoutParams(
-                Ui.dp(this, 26), Ui.dp(this, 28), Gravity.TOP | Gravity.END));
+                Ui.dp(this, 16), Ui.dp(this, 16), Gravity.TOP | Gravity.END);
+        tp.setMargins(0, Ui.dp(this, 8), Ui.dp(this, 8), 0);
+        cover.addView(tag, tp);
       }
+      if (selecting) addSelection(cover, selected.contains(page.id), false);
       card.addView(cover, new LinearLayout.LayoutParams(-1, coverHeight()));
-      TextView number = Ui.bold(this, "" + (i + 1), 13);
+      TextView number = Ui.text(this, "" + (i + 1), 12, Ui.INK);
+      number.setIncludeFontPadding(false);
       number.setGravity(Gravity.CENTER);
-      Ui.padding(number, 0, 6);
+      Ui.padding(number, 0, 8);
       card.addView(number);
       row.addView(card, new LinearLayout.LayoutParams(0, -2, 1));
       card.setContentDescription("第 " + (i + 1) + " 页，" + page.status);
       card.setOnClickListener(
           v -> {
+            if (coverPicking) {
+              store.setFolderCover(folderId, page.id);
+              coverPicking = false;
+              selecting = false;
+              refresh();
+              return;
+            }
             if (selecting) {
               if (!selected.add(page.id)) selected.remove(page.id);
               refresh();
@@ -465,7 +556,7 @@ public final class MainActivity extends Activity {
                       .putExtra("page", page.id)
                       .putExtra("folder", documentId == null ? folderId : 0L));
             else if ("error".equals(page.status))
-              new AlertDialog.Builder(this)
+              Ui.alert(this)
                   .setTitle("处理未完成")
                   .setMessage(page.error)
                   .setPositiveButton(
@@ -495,26 +586,18 @@ public final class MainActivity extends Activity {
   private void empty(LinearLayout box, String title, String body, boolean actions) {
     LinearLayout empty = Ui.column(this);
     empty.setGravity(Gravity.CENTER);
-    Ui.padding(empty, 24, 48);
-    ImageView icon = Ui.logo(this);
-    empty.addView(icon, new LinearLayout.LayoutParams(Ui.dp(this, 82), Ui.dp(this, 82)));
-    empty.addView(Ui.spacer(this, 22));
-    TextView heading = Ui.bold(this, title, 22);
+    Ui.padding(empty, 32, 64);
+    TextView heading = Ui.text(this, trash ? "没有项目被删除" : "让我们开始扫描吧", 20, Ui.INK);
     heading.setGravity(Gravity.CENTER);
     empty.addView(heading);
-    TextView note = Ui.text(this, body, 14, Ui.MUTED);
-    note.setGravity(Gravity.CENTER);
-    note.setLineSpacing(Ui.dp(this, 5), 1);
-    Ui.padding(note, 0, 16);
-    empty.addView(note);
-    if (actions) {
-      empty.addView(
-          Ui.primary(this, "开始扫描", this::camera),
-          new LinearLayout.LayoutParams(Ui.dp(this, 180), Ui.dp(this, 48)));
-      empty.addView(Ui.spacer(this, 10));
-      empty.addView(Ui.pill(this, "从图片 / PDF 导入", false, this::pick));
+    if (!trash) {
+      TextView note = Ui.text(this, "点击相机按钮开始扫描。", 16, Ui.MUTED);
+      note.setGravity(Gravity.CENTER);
+      LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(-1, -2);
+      np.topMargin = Ui.dp(this, 16);
+      empty.addView(note, np);
     }
-    box.addView(empty);
+    box.addView(empty, new LinearLayout.LayoutParams(-1, -2));
   }
 
   private void camera() {
@@ -525,14 +608,7 @@ public final class MainActivity extends Activity {
   }
 
   private void search() {
-    Ui.rename(
-        this,
-        "搜索文档名称",
-        search,
-        value -> {
-          search = value.trim();
-          refresh();
-        });
+    LibrarySearchDialog.show(this, folderId, this::openFolder);
   }
 
   private void pick() {
@@ -636,34 +712,49 @@ public final class MainActivity extends Activity {
   }
 
   private void renameCurrent() {
-    if (folderId > 0) {
-      Ui.rename(
+    if (documentId != null) {
+      DocumentStore.Document doc = store.document(documentId);
+      if (doc == null) return;
+      LibraryInputDialog.show(
           this,
           "改名",
-          folderName(),
+          "名称",
+          doc.title,
+          "确定",
+          null,
           name -> {
-            store.renameFolder(folderId, name);
+            store.renameDocument(doc.id, name);
             refresh();
           });
-    } else {
-      List<DocumentStore.Folder> folders = store.folders();
-      new AlertDialog.Builder(this)
-          .setTitle("选择文件夹")
-          .setItems(
-              folders.stream().map(f -> f.name).toArray(String[]::new),
-              (d, w) -> {
-                DocumentStore.Folder f = folders.get(w);
-                Ui.rename(
-                    this,
-                    "改名",
-                    f.name,
-                    name -> {
-                      store.renameFolder(f.id, name);
-                      refresh();
-                    });
-              })
-          .show();
+      return;
     }
+    if (folderId > 0) {
+      LibraryInputDialog.renameFolder(this, folderId, folderName(), this::refresh);
+      return;
+    }
+    if (selectedFolders.size() != 1) {
+      selecting = true;
+      refresh();
+      return;
+    }
+    long id = selectedFolders.iterator().next();
+    FolderSecurity.require(
+        this,
+        id,
+        () -> {
+          for (DocumentStore.Folder f : store.folders())
+            if (f.id == id)
+              LibraryInputDialog.renameFolder(
+                  this,
+                  id,
+                  f.name,
+                  () -> {
+                    selecting = false;
+                    selectedFolders.clear();
+                    refresh();
+                  });
+        },
+        () -> {});
   }
 
   private void moveSelected() {
@@ -684,8 +775,22 @@ public final class MainActivity extends Activity {
   }
 
   private void toolbarMenu(View anchor) {
-    PopupMenu popup = new PopupMenu(this, anchor);
-    if (folderId == 0 && documentId == null) {
+    PopupMenu popup = Ui.popup(this, anchor);
+    if (selecting) {
+      boolean all =
+          selectionCount()
+              == (trash
+                  ? store.trashPages().size() + store.folders(true).size()
+                  : folderId == 0 ? store.folders().size() : visiblePages().size());
+      popup
+          .getMenu()
+          .add(all ? "取消全选" : "全选")
+          .setOnMenuItemClickListener(
+              item -> {
+                selectAll(!all);
+                return true;
+              });
+    } else if (folderId == 0 && documentId == null) {
       popup
           .getMenu()
           .add("文件夹排序方式")
@@ -705,6 +810,22 @@ public final class MainActivity extends Activity {
               });
       popup
           .getMenu()
+          .add("页面排序方式")
+          .setOnMenuItemClickListener(
+              item -> {
+                sortPages();
+                return true;
+              });
+      popup
+          .getMenu()
+          .add("显示标记的页面")
+          .setOnMenuItemClickListener(
+              item -> {
+                filterTags();
+                return true;
+              });
+      popup
+          .getMenu()
           .add("选择页面")
           .setOnMenuItemClickListener(
               item -> {
@@ -714,50 +835,96 @@ public final class MainActivity extends Activity {
               });
       popup
           .getMenu()
-          .add("改名")
+          .add("更改封面")
+          .setOnMenuItemClickListener(
+              item -> {
+                coverPicking = true;
+                selecting = true;
+                refresh();
+                return true;
+              });
+      popup
+          .getMenu()
+          .add("变更资料夹名称")
           .setOnMenuItemClickListener(
               item -> {
                 renameCurrent();
                 return true;
               });
+      if (folderId > 0) {
+        popup
+            .getMenu()
+            .add(store.folderLocked(folderId) ? "解除安全文件夹" : "设置安全文件夹")
+            .setOnMenuItemClickListener(
+                item -> {
+                  FolderSecurity.lockFolder(
+                      this,
+                      folderId,
+                      () -> {
+                        if (store.folderLocked(folderId)) {
+                          folderId = 0;
+                          documentId = null;
+                          selected.clear();
+                          selecting = false;
+                        }
+                        refresh();
+                      });
+                  return true;
+                });
+        popup
+            .getMenu()
+            .add("删除资料夹")
+            .setOnMenuItemClickListener(
+                item -> {
+                  selectedFolders.clear();
+                  selectedFolders.add(folderId);
+                  deleteFolders();
+                  return true;
+                });
+      }
     }
-    popup
-        .getMenu()
-        .add("客户支持")
-        .setOnMenuItemClickListener(
-            item -> {
-              Support.show(this);
-              return true;
-            });
-    popup
-        .getMenu()
-        .add("设置")
-        .setOnMenuItemClickListener(
-            item -> {
-              settings();
-              return true;
-            });
-    popup
-        .getMenu()
-        .add("回收站")
-        .setOnMenuItemClickListener(
-            item -> {
-              trash = true;
-              folderId = 0;
-              documentId = null;
-              refresh();
-              return true;
-            });
+    if (!selecting && !trash) {
+      popup
+          .getMenu()
+          .add("客户支持")
+          .setOnMenuItemClickListener(
+              item -> {
+                Support.show(this);
+                return true;
+              });
+      popup
+          .getMenu()
+          .add("设置")
+          .setOnMenuItemClickListener(
+              item -> {
+                settings();
+                return true;
+              });
+      popup
+          .getMenu()
+          .add("回收站")
+          .setOnMenuItemClickListener(
+              item -> {
+                trash = true;
+                folderId = 0;
+                documentId = null;
+                selected.clear();
+                selectedFolders.clear();
+                FolderSecurity.clearProtection(this);
+                refresh();
+                return true;
+              });
+    }
     popup.show();
   }
 
   private void sortFolders() {
-    String[] names = {"名称（升序）", "名称（降序）", "创建时间（最新）", "创建时间（最早）"};
-    new AlertDialog.Builder(this)
+    String[] names = {"文件夹名称，升序", "文件夹名称，降序", "创建日期，升序", "创建日期，降序", "修改日期，升序", "修改日期，降序"};
+    Ui.alert(this)
         .setTitle("文件夹排序方式")
         .setSingleChoiceItems(
             names,
-            getPreferences(0).getInt("folder_sort", 3),
+            getPreferences(0).getInt("folder_sort", 2),
             (d, w) -> {
               getPreferences(0).edit().putInt("folder_sort", w).apply();
               d.dismiss();
@@ -768,7 +935,7 @@ public final class MainActivity extends Activity {
   }
 
   private void folderMenu(DocumentStore.Folder f) {
-    new AlertDialog.Builder(this)
+    Ui.alert(this)
         .setTitle(f.name)
         .setItems(
             f.id == 1 ? new String[] {"重命名"} : new String[] {"重命名", "删除文件夹"},
@@ -783,7 +950,7 @@ public final class MainActivity extends Activity {
                       refresh();
                     });
               else
-                new AlertDialog.Builder(this)
+                Ui.alert(this)
                     .setMessage("文件夹内文档将移到默认文件夹。")
                     .setPositiveButton(
                         "删除文件夹",
@@ -800,7 +967,7 @@ public final class MainActivity extends Activity {
 
   private void documentMenu(DocumentStore.Document doc) {
     if (trash) {
-      new AlertDialog.Builder(this)
+      Ui.alert(this)
           .setTitle(doc.title)
           .setItems(
               new String[] {"恢复文档", "永久删除"},
@@ -827,7 +994,7 @@ public final class MainActivity extends Activity {
           .show();
       return;
     }
-    new AlertDialog.Builder(this)
+    Ui.alert(this)
         .setTitle(doc.title)
         .setItems(
             new String[] {"重命名", "移动到文件夹", "放入回收站"},
@@ -852,7 +1019,7 @@ public final class MainActivity extends Activity {
 
   private void move(DocumentStore.Document doc) {
     List<DocumentStore.Folder> folders = store.folders();
-    new AlertDialog.Builder(this)
+    Ui.alert(this)
         .setTitle("移动到")
         .setItems(
             folders.stream().map(f -> f.name).toArray(String[]::new),
@@ -887,10 +1054,29 @@ public final class MainActivity extends Activity {
   }
 
   private void deleteSelected() {
-    if (selected.isEmpty()) return;
+    if (!trash && (folderId == 0 || !selectedFolders.isEmpty())) {
+      deleteFolders();
+      return;
+    }
+    if (selectionCount() == 0) {
+      selecting = true;
+      refresh();
+      return;
+    }
     List<String> ids = new ArrayList<>(selected);
+    if (!trash) {
+      confirm(
+          "您确定要删除所选页面吗？",
+          () -> {
+            store.trashPages(ids);
+            selected.clear();
+            selecting = false;
+            refresh();
+          });
+      return;
+    }
     confirm(
-        "删除所选 " + ids.size() + " 页及其原图？",
+        "彻底删除所选项目？",
         () ->
             MyFlatApp.of(this)
                 .io
@@ -898,9 +1084,12 @@ public final class MainActivity extends Activity {
                     () -> {
                       try {
                         for (String id : ids) store.deletePage(id);
+                        for (long id : new ArrayList<>(selectedFolders))
+                          store.permanentlyDeleteFolder(id);
                         runOnUiThread(
                             () -> {
                               selected.clear();
+                              selectedFolders.clear();
                               selecting = false;
                               refresh();
                             });
@@ -912,13 +1101,17 @@ public final class MainActivity extends Activity {
 
   private void emptyTrash() {
     confirm(
-        "永久清空回收站？",
+        "您确定要清空回收站吗？",
         () ->
             MyFlatApp.of(this)
                 .io
                 .submit(
                     () -> {
                       try {
+                        for (DocumentStore.Page page : store.trashPages())
+                          store.deletePage(page.id);
+                        for (DocumentStore.Folder f : store.folders(true))
+                          store.permanentlyDeleteFolder(f.id);
                         for (DocumentStore.Document d : store.documents(0, "", true))
                           store.permanentlyDelete(d.id);
                         runOnUiThread(this::refresh);
@@ -929,11 +1122,287 @@ public final class MainActivity extends Activity {
   }
 
   private void confirm(String message, Runnable run) {
-    new AlertDialog.Builder(this)
+    Ui.alert(this)
         .setMessage(message)
         .setPositiveButton("确认", (d, w) -> run.run())
         .setNegativeButton("取消", null)
         .show();
+  }
+
+  private int selectionCount() {
+    return selected.size() + selectedFolders.size();
+  }
+
+  private TextView headerText(String name, Runnable run) {
+    TextView view = Ui.text(this, name, 14, Ui.INK);
+    view.setGravity(Gravity.CENTER);
+    Ui.padding(view, 12, 0);
+    view.setOnClickListener(v -> run.run());
+    view.setLayoutParams(new LinearLayout.LayoutParams(-2, Ui.dp(this, 48)));
+    return view;
+  }
+
+  private void openFolder(long id) {
+    FolderSecurity.require(
+        this,
+        id,
+        () -> {
+          folderId = id;
+          documentId = null;
+          search = "";
+          selected.clear();
+          selectedFolders.clear();
+          selecting = false;
+          colorFilter = null;
+          refresh();
+        },
+        () -> {});
+  }
+
+  private void addSelection(FrameLayout cover, boolean checked, boolean folder) {
+    android.graphics.drawable.GradientDrawable outline =
+        Ui.shape(Color.TRANSPARENT, Ui.dp(this, folder ? 6 : 0));
+    outline.setStroke(Ui.dp(this, checked ? 2 : 0), Ui.GREEN);
+    View border = new View(this);
+    border.setBackground(outline);
+    cover.addView(border, new FrameLayout.LayoutParams(-1, -1));
+    TextView mark = Ui.text(this, checked ? "✓" : "", 16, Color.WHITE);
+    mark.setGravity(Gravity.CENTER);
+    android.graphics.drawable.GradientDrawable ring =
+        Ui.shape(checked ? Ui.GREEN : 0xccffffff, Ui.dp(this, 12));
+    if (!checked) ring.setStroke(Ui.dp(this, 2), 0xffbdbdbd);
+    mark.setBackground(ring);
+    FrameLayout.LayoutParams cp =
+        new FrameLayout.LayoutParams(
+            Ui.dp(this, folder ? 24 : 20),
+            Ui.dp(this, folder ? 24 : 20),
+            (folder ? Gravity.TOP : Gravity.BOTTOM) | Gravity.END);
+    cp.setMargins(0, Ui.dp(this, folder ? 12 : 8), Ui.dp(this, folder ? 12 : 8), Ui.dp(this, 8));
+    cover.addView(mark, cp);
+  }
+
+  private void selectAll(boolean all) {
+    selected.clear();
+    selectedFolders.clear();
+    if (all) {
+      if (trash) {
+        for (DocumentStore.Page p : store.trashPages()) selected.add(p.id);
+        for (DocumentStore.Folder f : store.folders(true)) selectedFolders.add(f.id);
+      } else if (folderId == 0 && documentId == null) {
+        for (DocumentStore.Folder f : store.folders()) selectedFolders.add(f.id);
+      } else for (DocumentStore.Page p : visiblePages()) selected.add(p.id);
+    }
+    refresh();
+  }
+
+  private void requireFolders(List<Long> ids, int at, Runnable allowed) {
+    if (at >= ids.size()) {
+      allowed.run();
+      return;
+    }
+    FolderSecurity.require(this, ids.get(at), () -> requireFolders(ids, at + 1, allowed), () -> {});
+  }
+
+  private void deleteFolders() {
+    if (selectedFolders.isEmpty()) {
+      selecting = true;
+      refresh();
+      return;
+    }
+    List<Long> ids = new ArrayList<>(selectedFolders);
+    if (ids.contains(1L)) {
+      Toast.makeText(this, "您无法删除默认文件夹。", Toast.LENGTH_SHORT).show();
+      return;
+    }
+    requireFolders(
+        ids,
+        0,
+        () ->
+            confirm(
+                "您确定要删除所选文件夹吗？",
+                () -> {
+                  for (long id : ids) store.trashFolder(id, true);
+                  selectedFolders.clear();
+                  selected.clear();
+                  selecting = false;
+                  if (folderId > 0) {
+                    folderId = 0;
+                    documentId = null;
+                    FolderSecurity.clearProtection(this);
+                  }
+                  refresh();
+                }));
+  }
+
+  private void restoreSelected() {
+    if (selectionCount() == 0) {
+      selecting = true;
+      refresh();
+      return;
+    }
+    store.restorePages(new ArrayList<>(selected));
+    for (long id : new ArrayList<>(selectedFolders)) store.trashFolder(id, false);
+    selected.clear();
+    selectedFolders.clear();
+    selecting = false;
+    refresh();
+    MyFlatApp.of(this).startProcessing();
+  }
+
+  private void sortPages() {
+    String[] names = {"创建日期，降序", "创建日期，升序", "页码，降序", "页码，升序"};
+    Ui.alert(this)
+        .setTitle("页面排序方式")
+        .setSingleChoiceItems(
+            names,
+            getPreferences(0).getInt("pages_sort_" + folderId, 3),
+            (d, w) -> {
+              getPreferences(0).edit().putInt("pages_sort_" + folderId, w).apply();
+              d.dismiss();
+              refresh();
+            })
+        .setNegativeButton("取消", null)
+        .show();
+  }
+
+  private void filterTags() {
+    String[] names = {"全部页面", "红色", "黄色", "绿色", "蓝色", "紫色", "无标记"};
+    int[] colors = {0, 0xffe57373, 0xffffd54f, 0xff81c784, 0xff90caf9, 0xffce93d8, 0};
+    Ui.alert(this)
+        .setTitle("显示标记的页面")
+        .setItems(
+            names,
+            (d, w) -> {
+              colorFilter = w == 0 ? null : colors[w];
+              refresh();
+            })
+        .show();
+  }
+
+  private void trashGrid(LinearLayout content) {
+    List<DocumentStore.Folder> folders = store.folders(true);
+    List<DocumentStore.Page> pages = new ArrayList<>(store.trashPages());
+    pages.removeIf(
+        p -> {
+          DocumentStore.Document doc = store.document(p.document);
+          return doc != null && !FolderSecurity.isAccessible(this, doc.folder);
+        });
+    if (folders.isEmpty() && pages.isEmpty()) {
+      empty(content, "没有项目被删除", "", false);
+      return;
+    }
+    LinearLayout row = null;
+    int index = 0;
+    for (DocumentStore.Folder folder : folders) {
+      if (index++ % 3 == 0) {
+        row = Ui.row(this);
+        row.setGravity(Gravity.TOP);
+        content.addView(row);
+      }
+      LinearLayout cell = Ui.column(this);
+      Ui.padding(cell, 4, 4);
+      FrameLayout cover = new FrameLayout(this);
+      cover.setBackgroundColor(0xfff5f5f5);
+      Ui.Icon icon = new Ui.Icon(this, "empty_folder");
+      icon.color = 0xffbdbdbd;
+      cover.addView(
+          icon, new FrameLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 40), Gravity.CENTER));
+      if (selecting) addSelection(cover, selectedFolders.contains(folder.id), true);
+      cell.addView(cover, new LinearLayout.LayoutParams(-1, coverHeight()));
+      TextView title = Ui.text(this, folder.name, 13, Ui.INK);
+      AppAppearance.keepText(title);
+      Ui.padding(title, 0, 8);
+      cell.addView(title);
+      cell.setContentDescription(folder.name + "，已删除文件夹");
+      cell.setOnClickListener(
+          v -> {
+            if (selecting) {
+              if (!selectedFolders.add(folder.id)) selectedFolders.remove(folder.id);
+              refresh();
+            } else
+              Ui.alert(this)
+                  .setTitle(folder.name)
+                  .setItems(
+                      new String[] {"恢复", "彻底删除"},
+                      (d, w) -> {
+                        selectedFolders.clear();
+                        selectedFolders.add(folder.id);
+                        if (w == 0) restoreSelected();
+                        else deleteSelected();
+                      })
+                  .show();
+          });
+      cell.setOnLongClickListener(
+          v -> {
+            selecting = true;
+            selectedFolders.add(folder.id);
+            refresh();
+            return true;
+          });
+      row.addView(cell, new LinearLayout.LayoutParams(0, -2, 1));
+    }
+    for (DocumentStore.Page page : pages) {
+      if (index++ % 3 == 0) {
+        row = Ui.row(this);
+        row.setGravity(Gravity.TOP);
+        content.addView(row);
+      }
+      LinearLayout cell = Ui.column(this);
+      Ui.padding(cell, 4, 4);
+      FrameLayout cover = new FrameLayout(this);
+      cover.setBackgroundColor(0xfff5f5f5);
+      ImageView image = new ImageView(this);
+      image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+      cover.addView(image, new FrameLayout.LayoutParams(-1, -1));
+      try {
+        Ui.thumbnail(image, store.file("ready".equals(page.status) ? page.result : page.original));
+      } catch (IOException ignored) {
+      }
+      if (selecting) addSelection(cover, selected.contains(page.id), true);
+      cell.addView(cover, new LinearLayout.LayoutParams(-1, coverHeight()));
+      long date = page.deleted > 0 ? page.deleted : System.currentTimeMillis();
+      TextView label =
+          Ui.text(
+              this,
+              new java.text.SimpleDateFormat("yyyy.MM.dd", Locale.getDefault())
+                  .format(new Date(date)),
+              13,
+              Ui.INK);
+      label.setGravity(Gravity.CENTER);
+      Ui.padding(label, 0, 8);
+      cell.addView(label);
+      cell.setContentDescription("已删除页面");
+      cell.setOnClickListener(
+          v -> {
+            if (selecting) {
+              if (!selected.add(page.id)) selected.remove(page.id);
+              refresh();
+            } else {
+              selected.clear();
+              selected.add(page.id);
+              Ui.alert(this)
+                  .setItems(
+                      new String[] {"恢复", "彻底删除"},
+                      (d, w) -> {
+                        if (w == 0) restoreSelected();
+                        else deleteSelected();
+                      })
+                  .show();
+            }
+          });
+      cell.setOnLongClickListener(
+          v -> {
+            selecting = true;
+            selected.add(page.id);
+            refresh();
+            return true;
+          });
+      row.addView(cell, new LinearLayout.LayoutParams(0, -2, 1));
+    }
+    if (row != null)
+      for (int n = index % 3; n > 0 && n < 3; n++)
+        row.addView(new Space(this), new LinearLayout.LayoutParams(0, 1, 1));
+    content.addView(Ui.spacer(this, 86));
   }
 
   private void settings() {
@@ -942,21 +1411,34 @@ public final class MainActivity extends Activity {
 
   private void export(Exporter.Format format) {
     if (documentId == null && folderId == 0) {
-      List<DocumentStore.Document> docs = store.documents(folderId, search, false);
-      if (docs.isEmpty()) {
-        Toast.makeText(this, "请先扫描或导入文档", Toast.LENGTH_SHORT).show();
+      if (selectedFolders.isEmpty()) {
+        selecting = true;
+        refresh();
         return;
       }
-      new AlertDialog.Builder(this)
-          .setTitle("选择要导出的文档")
-          .setItems(
-              docs.stream().map(d -> d.title).toArray(String[]::new),
-              (d, w) -> {
-                documentId = docs.get(w).id;
-                refresh();
-                export(format);
-              })
-          .show();
+      List<Long> ids = new ArrayList<>(selectedFolders);
+      requireFolders(
+          ids,
+          0,
+          () -> {
+            List<DocumentStore.Page> all = new ArrayList<>();
+            for (long id : ids)
+              for (DocumentStore.Document d : store.documents(id, "", false))
+                all.addAll(store.pages(d.id));
+            if (all.isEmpty()) {
+              Toast.makeText(this, "请选择页面", Toast.LENGTH_SHORT).show();
+              return;
+            }
+            String name =
+                ids.size() == 1
+                    ? store.folders().stream()
+                        .filter(f -> f.id == ids.get(0))
+                        .map(f -> f.name)
+                        .findFirst()
+                        .orElse("文件")
+                    : "文件";
+            ExportActivity.open(this, name, all, format);
+          });
       return;
     }
     List<DocumentStore.Page> pages = new ArrayList<>();
@@ -993,7 +1475,7 @@ public final class MainActivity extends Activity {
                     () -> {
                       dialog.dismiss();
                       pendingExport = file;
-                      new AlertDialog.Builder(this)
+                      Ui.alert(this)
                           .setTitle("文件已生成")
                           .setMessage(
                               file.getName()
@@ -1045,10 +1527,15 @@ public final class MainActivity extends Activity {
   private void back() {
     if (selecting) {
       selecting = false;
+      coverPicking = false;
       selected.clear();
+      selectedFolders.clear();
     } else if (documentId != null) documentId = null;
-    else if (folderId > 0) folderId = 0;
-    else if (trash) trash = false;
+    else if (folderId > 0) {
+      folderId = 0;
+      colorFilter = null;
+      FolderSecurity.clearProtection(this);
+    } else if (trash) trash = false;
     else {
       finish();
       return;

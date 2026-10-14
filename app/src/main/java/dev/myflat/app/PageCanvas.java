@@ -21,6 +21,9 @@ final class PageCanvas extends View {
   }
 
   Swipe onSwipe;
+  Runnable onChanged;
+  private Bitmap paper, eraseBase;
+  private boolean brushPreview;
   private float downX, downY;
   private boolean multiTouch;
   private Bitmap bitmap;
@@ -155,7 +158,7 @@ final class PageCanvas extends View {
   private boolean rectangle;
   private final ScaleGestureDetector pinch;
   private final GestureDetector gestures;
-  private final ArrayDeque<Bitmap> undo = new ArrayDeque<>();
+  private final ArrayDeque<Stroke> redo = new ArrayDeque<>();
   private final java.util.ArrayList<Stroke> strokes = new java.util.ArrayList<>();
 
   private static final class Stroke {
@@ -164,8 +167,7 @@ final class PageCanvas extends View {
   }
 
   void applyBrushes(Bitmap full) {
-    Paint brush = new Paint(Paint.ANTI_ALIAS_FLAG);
-    brush.setColor(Color.WHITE);
+    Paint brush = paperBrush(full.getWidth(), full.getHeight());
     Canvas target = new Canvas(full);
     for (Stroke stroke : strokes)
       for (PointF p : stroke.points)
@@ -228,6 +230,8 @@ final class PageCanvas extends View {
     if (value == Mode.ERASE && bitmap != null && !ownsBitmap) {
       bitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true);
       ownsBitmap = true;
+      if (eraseBase != null) eraseBase.recycle();
+      eraseBase = bitmap.copy(Bitmap.Config.ARGB_8888, false);
     }
     invalidate();
   }
@@ -238,6 +242,45 @@ final class PageCanvas extends View {
 
   void brush(float value) {
     brush = value;
+    invalidate();
+  }
+
+  void paperBackground(Bitmap value) {
+    paper = value;
+  }
+
+  void showBrushPreview(boolean show) {
+    brushPreview = show;
+    invalidate();
+  }
+
+  boolean hasUndo() {
+    return !strokes.isEmpty();
+  }
+
+  boolean hasRedo() {
+    return !redo.isEmpty();
+  }
+
+  private Paint paperBrush(int width, int height) {
+    Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    fill.setColor(Color.WHITE);
+    if (paper != null && !paper.isRecycled()) {
+      BitmapShader shader = new BitmapShader(paper, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+      Matrix transform = new Matrix();
+      transform.setScale((float) width / paper.getWidth(), (float) height / paper.getHeight());
+      shader.setLocalMatrix(transform);
+      fill.setShader(shader);
+    }
+    return fill;
+  }
+
+  private void replay() {
+    if (eraseBase == null || bitmap == null) return;
+    new Canvas(bitmap).drawBitmap(eraseBase, 0, 0, null);
+    applyBrushes(bitmap);
+    invalidate();
+    if (onChanged != null) onChanged.run();
   }
 
   void resetCorners() {
@@ -267,18 +310,26 @@ final class PageCanvas extends View {
   }
 
   void undo() {
-    if (!undo.isEmpty()) {
-      if (ownsBitmap) bitmap.recycle();
-      bitmap = undo.removeLast();
-      if (!strokes.isEmpty()) strokes.remove(strokes.size() - 1);
-      invalidate();
+    if (!strokes.isEmpty()) {
+      redo.addLast(strokes.remove(strokes.size() - 1));
+      replay();
+    }
+  }
+
+  void redo() {
+    if (!redo.isEmpty()) {
+      strokes.add(redo.removeLast());
+      replay();
     }
   }
 
   private void clearUndo() {
-    for (Bitmap old : undo) old.recycle();
-    undo.clear();
+    redo.clear();
     strokes.clear();
+    if (eraseBase != null) {
+      eraseBase.recycle();
+      eraseBase = null;
+    }
   }
 
   private void transform() {
@@ -305,6 +356,15 @@ final class PageCanvas extends View {
     paint.setColor(Color.WHITE);
     canvas.drawBitmap(bitmap, matrix, paint);
     drawDetail(canvas);
+    if (brushPreview && mode == Mode.ERASE) {
+      paint.setStyle(Paint.Style.FILL);
+      paint.setColor(0xccffffff);
+      canvas.drawCircle(getWidth() / 2f, getHeight() / 2f, brush, paint);
+      paint.setStyle(Paint.Style.STROKE);
+      paint.setColor(0xff9e9e9e);
+      paint.setStrokeWidth(Ui.dp(getContext(), 1));
+      canvas.drawCircle(getWidth() / 2f, getHeight() / 2f, brush, paint);
+    }
     if (mode == Mode.CROP) {
       System.arraycopy(corners, 0, screenCorners, 0, 8);
       float[] p = screenCorners;
@@ -347,7 +407,8 @@ final class PageCanvas extends View {
       stroke.radius = radius / bitmap.getWidth();
       stroke.points.add(new PointF(point[0] / bitmap.getWidth(), point[1] / bitmap.getHeight()));
     }
-    new Canvas(bitmap).drawCircle(point[0], point[1], radius, paint);
+    new Canvas(bitmap)
+        .drawCircle(point[0], point[1], radius, paperBrush(bitmap.getWidth(), bitmap.getHeight()));
     invalidate();
   }
 
@@ -380,8 +441,7 @@ final class PageCanvas extends View {
           }
         }
         if (mode == Mode.ERASE) {
-          if (undo.size() >= 2) undo.removeFirst().recycle();
-          undo.addLast(bitmap.copy(Bitmap.Config.ARGB_8888, true));
+          redo.clear();
           strokes.add(new Stroke());
           erase(x, y);
         }
@@ -426,6 +486,7 @@ final class PageCanvas extends View {
             && Math.abs(y - downY) < Ui.dp(getContext(), 96)
             && onSwipe != null) onSwipe.accept(x < downX ? 1 : -1);
         handle = -1;
+        if (mode == Mode.ERASE && onChanged != null) onChanged.run();
         performClick();
         return true;
       default:
