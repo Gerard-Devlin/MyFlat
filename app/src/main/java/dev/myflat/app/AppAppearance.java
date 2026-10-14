@@ -222,7 +222,41 @@ final class AppAppearance {
   static void watch(View root) {
     if (!watchers.containsKey(root)) {
       watchers.put(root, Boolean.TRUE);
-      root.getViewTreeObserver().addOnGlobalLayoutListener(() -> apply(root));
+      class AppearanceObserver
+          implements View.OnAttachStateChangeListener,
+              android.view.ViewTreeObserver.OnGlobalLayoutListener {
+        final java.lang.ref.WeakReference<View> target;
+
+        AppearanceObserver(View view) {
+          target = new java.lang.ref.WeakReference<>(view);
+        }
+
+        android.view.ViewTreeObserver observer;
+
+        public void onViewAttachedToWindow(View view) {
+          detach();
+          observer = view.getViewTreeObserver();
+          observer.addOnGlobalLayoutListener(this);
+        }
+
+        public void onViewDetachedFromWindow(View view) {
+          detach();
+        }
+
+        private void detach() {
+          if (observer != null && observer.isAlive()) observer.removeOnGlobalLayoutListener(this);
+          observer = null;
+        }
+
+        public void onGlobalLayout() {
+          View view = target.get();
+          if (view == null) detach();
+          else apply(view);
+        }
+      }
+      AppearanceObserver listener = new AppearanceObserver(root);
+      root.addOnAttachStateChangeListener(listener);
+      if (root.isAttachedToWindow()) listener.onViewAttachedToWindow(root);
     }
     apply(root);
   }
