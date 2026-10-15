@@ -8,6 +8,7 @@ public final class ScanSource implements AutoCloseable {
   private final BitmapRegionDecoder decoder;
   private final Matrix toView = new Matrix(), toRaw = new Matrix();
   public final int width, height;
+  private long decodingNanos;
 
   public ScanSource(
       File file,
@@ -95,35 +96,77 @@ public final class ScanSource implements AutoCloseable {
   }
 
   public Bitmap render(int w, int h, ImageMath.Mapping mapping) {
-    return ImageMath.raster(
-        new ImageMath.PixelSource() {
-          public int width() {
-            return decoder.getWidth();
-          }
+    decodingNanos = 0;
+    Bitmap decoded = null;
+    Runtime runtime = Runtime.getRuntime();
+    long sourceBytes = (long) decoder.getWidth() * decoder.getHeight() * 4;
+    long outputBytes = (long) w * h * 4;
+    long available = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory());
+    // Decode ordinary sensor images once. Very large images retain the bounded-region path.
+    if (sourceBytes <= 64L * 1024 * 1024 && sourceBytes + outputBytes <= available / 2) {
+      long start = System.nanoTime();
+      try {
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        decoded =
+            decoder.decodeRegion(new Rect(0, 0, decoder.getWidth(), decoder.getHeight()), options);
+      } catch (OutOfMemoryError insufficientHeadroom) {
+        // A concurrent camera allocation can consume the headroom checked above.
+        decoded = null;
+      }
+      decodingNanos += System.nanoTime() - start;
+    }
+    Bitmap full = decoded;
+    try {
+      return ImageMath.raster(
+          new ImageMath.PixelSource() {
+            private int[] scratch;
 
-          public int height() {
-            return decoder.getHeight();
-          }
+            public int width() {
+              return decoder.getWidth();
+            }
 
-          public int[] read(Rect rect) {
-            BitmapFactory.Options options = new BitmapFactory.Options();
-            options.inPreferredConfig = Bitmap.Config.ARGB_8888;
-            Bitmap tile = decoder.decodeRegion(rect, options);
-            if (tile == null) throw new IllegalStateException("无法读取原图区域");
-            int[] pixels = new int[rect.width() * rect.height()];
-            tile.getPixels(pixels, 0, rect.width(), 0, 0, rect.width(), rect.height());
-            tile.recycle();
-            return pixels;
-          }
-        },
-        w,
-        h,
-        points -> {
-          mapping.map(points);
-          for (int i = 0; i < points.length; i++) points[i] += .5f;
-          toRaw.mapPoints(points);
-          for (int i = 0; i < points.length; i++) points[i] -= .5f;
-        });
+            public int height() {
+              return decoder.getHeight();
+            }
+
+            public int[] read(Rect rect) {
+              long start = System.nanoTime();
+              int count = rect.width() * rect.height();
+              if (scratch == null || scratch.length < count) scratch = new int[count];
+              if (full != null) {
+                full.getPixels(
+                    scratch, 0, rect.width(), rect.left, rect.top, rect.width(), rect.height());
+              } else {
+                BitmapFactory.Options options = new BitmapFactory.Options();
+                options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+                Bitmap tile = decoder.decodeRegion(rect, options);
+                if (tile == null) throw new IllegalStateException("无法读取原图区域");
+                try {
+                  tile.getPixels(scratch, 0, rect.width(), 0, 0, rect.width(), rect.height());
+                } finally {
+                  tile.recycle();
+                }
+              }
+              decodingNanos += System.nanoTime() - start;
+              return scratch;
+            }
+          },
+          w,
+          h,
+          points -> {
+            mapping.map(points);
+            for (int i = 0; i < points.length; i++) points[i] += .5f;
+            toRaw.mapPoints(points);
+            for (int i = 0; i < points.length; i++) points[i] -= .5f;
+          });
+    } finally {
+      if (full != null) full.recycle();
+    }
+  }
+
+  long decodingMillis() {
+    return decodingNanos / 1_000_000;
   }
 
   @Override

@@ -50,6 +50,8 @@ public final class ScanEngine {
     Map<String, Long> times = new LinkedHashMap<>();
     StringBuilder debug = new StringBuilder();
     Bitmap preview = source.preview(1600), workingPreview = preview;
+    times.put("preview", SystemClock.elapsedRealtime() - started);
+    long stageStart = SystemClock.elapsedRealtime();
     int outputWidth = source.width, outputHeight = source.height;
     Warp warp = null;
     progress.update("准备图像", 5);
@@ -85,6 +87,8 @@ public final class ScanEngine {
                 }
               });
     }
+    times.put("dewarp_plan_preview", SystemClock.elapsedRealtime() - stageStart);
+    stageStart = SystemClock.elapsedRealtime();
     progress.update("页面展平", 25);
     checkCancelled();
     float[] straight =
@@ -100,6 +104,7 @@ public final class ScanEngine {
     float[] fingerInput = options.fingers ? ImageMath.input(workingPreview, 320, 320, false) : null;
     if (workingPreview != preview) workingPreview.recycle();
     preview.recycle();
+    times.put("straighten_preview", SystemClock.elapsedRealtime() - stageStart);
     Warp planned = warp;
     int ow = outputWidth, oh = outputHeight;
     long rasterStart = SystemClock.elapsedRealtime();
@@ -112,32 +117,42 @@ public final class ScanEngine {
                 for (int i = 0; i < points.length; i += 2) {
                   float gx = points[i] / Math.max(1, ow - 1) * 319,
                       gy = points[i + 1] / Math.max(1, oh - 1) * 319;
-                  points[i] = ImageMath.field(straight, 320, 320, 2, gx, gy, 0) * ow - .5f;
-                  points[i + 1] = ImageMath.field(straight, 320, 320, 2, gx, gy, 1) * oh - .5f;
+                  BilinearField.pair(straight, 320, 320, gx, gy, points, i);
+                  points[i] = points[i] * ow - .5f;
+                  points[i + 1] = points[i + 1] * oh - .5f;
                 }
               if (planned != null) planned.map(points);
             });
-    if (options.dewarp) current = ImageMath.sharpen(current);
     times.put("raster", SystemClock.elapsedRealtime() - rasterStart);
+    times.put("decode", source.decodingMillis());
+    stageStart = SystemClock.elapsedRealtime();
+    if (options.dewarp) current = ImageMath.sharpen(current);
+    times.put("sharpen", SystemClock.elapsedRealtime() - stageStart);
     emit(observer, "01-dewarp", current);
     progress.update("色彩增强", 45);
     checkCancelled();
+    stageStart = SystemClock.elapsedRealtime();
     if (options.enhance) {
       current = enhance(current);
       emit(observer, "03-enhance", current);
     }
+    times.put("enhance", SystemClock.elapsedRealtime() - stageStart);
+    stageStart = SystemClock.elapsedRealtime();
     progress.update("手指消除", 65);
     checkCancelled();
     if (options.fingers) {
       current = removeFingers(current, fingerInput, debug);
       emit(observer, "04-fingers", current);
     }
+    times.put("fingers", SystemClock.elapsedRealtime() - stageStart);
+    stageStart = SystemClock.elapsedRealtime();
     progress.update("手写消除", 85);
     checkCancelled();
     if (options.handwriting) {
       current = handwriting(current, progress);
       emit(observer, "05-handwriting", current);
     }
+    times.put("handwriting", SystemClock.elapsedRealtime() - stageStart);
     times.put("total", SystemClock.elapsedRealtime() - started);
     progress.update("处理完成", 100);
     return new Result(current, times, debug.toString());
@@ -238,8 +253,9 @@ public final class ScanEngine {
       for (int i = 0; i < points.length; i += 2) {
         float gx = points[i] / Math.max(1, width - 1) * 63,
             gy = points[i + 1] / Math.max(1, height - 1) * 63;
-        points[i] = ImageMath.field(grid, 64, 64, 2, gx, gy, 0) * paddedWidth - .5f - dx;
-        points[i + 1] = ImageMath.field(grid, 64, 64, 2, gx, gy, 1) * paddedHeight - .5f - dy;
+        BilinearField.pair(grid, 64, 64, gx, gy, points, i);
+        points[i] = points[i] * paddedWidth - .5f - dx;
+        points[i + 1] = points[i + 1] * paddedHeight - .5f - dy;
       }
     }
   }
@@ -369,8 +385,9 @@ public final class ScanEngine {
           for (int i = 0; i < points.length; i += 2) {
             float gx = points[i] / Math.max(1, w - 1) * (gw - 1),
                 gy = points[i + 1] / Math.max(1, h - 1) * (gh - 1);
-            points[i] = ImageMath.field(grid, gw, gh, 2, gx, gy, 0) * sw - .5f;
-            points[i + 1] = ImageMath.field(grid, gw, gh, 2, gx, gy, 1) * sh - .5f;
+            BilinearField.pair(grid, gw, gh, gx, gy, points, i);
+            points[i] = points[i] * sw - .5f;
+            points[i + 1] = points[i + 1] * sh - .5f;
           }
         });
   }
@@ -402,28 +419,30 @@ public final class ScanEngine {
     int w = source.getWidth(), h = source.getHeight();
     if (!source.isMutable()) source = source.copy(Bitmap.Config.ARGB_8888, true);
     int[] p = new int[w], out = new int[w];
-    float[] rgb = new float[3], d = new float[4];
+    float[] rgb = new float[3], backgroundRow = new float[w * 4];
+    BilinearField background = new BilinearField(dist, 320, 320, 4, w);
+    BilinearField blackField = useBlack ? new BilinearField(black, 20, 20, 4, w) : null;
+    float[] blackRow = useBlack ? new float[w * 4] : null;
     for (int y = 0; y < h; y++) {
       if (y % 32 == 0) checkCancelled();
       source.getPixels(p, 0, w, 0, y, w, 1);
-      float fy = (float) y / Math.max(1, h - 1);
+      background.row(y, h, backgroundRow);
+      if (blackField != null) blackField.row(y, h, blackRow);
       for (int x = 0; x < w; x++) {
-        float fx = (float) x / (w - 1);
-        int color = p[x];
+        int color = p[x], sample = x * 4;
         boolean almost = true;
         for (int c = 0; c < 4; c++) {
-          d[c] = ImageMath.field(dist, 320, 320, 4, fx * 319, fy * 319, c);
           float original = c == 3 ? 1 : ((color >> (16 - c * 8)) & 255) / 255f;
-          if (Math.abs(d[c] - original) >= .05f) almost = false;
+          if (Math.abs(backgroundRow[sample + c] - original) >= .05f) almost = false;
         }
         for (int c = 0; c < 3; c++) {
           float v = ((color >> (16 - c * 8)) & 255) / 255f;
-          float reference = almost ? v : d[c];
+          float reference = almost ? v : backgroundRow[sample + c];
           float a = ContrastTables.PRE_CONTRAST_MAP[(int) (ImageMath.clamp(v) * 255)] / 255f,
               b = ContrastTables.PRE_CONTRAST_MAP[(int) (ImageMath.clamp(reference) * 255)] / 255f;
           float value = ImageMath.clamp(a / Math.max(1e-7f, b));
           if (useBlack) {
-            float bp = ImageMath.field(black, 20, 20, 4, fx * 19, fy * 19, c);
+            float bp = blackRow[sample + c];
             value = ImageMath.clamp((value - bp) / Math.max(1e-7f, 1 - bp));
           }
           rgb[c] = ContrastTables.POST_CONTRAST_MAP[(int) (value * 255)] / 255f;
@@ -468,13 +487,16 @@ public final class ScanEngine {
     int w = source.getWidth(), h = source.getHeight(), count = 0;
     if (!source.isMutable()) source = source.copy(Bitmap.Config.ARGB_8888, true);
     int[] out = new int[w];
+    BilinearField fingerField = new BilinearField(mask, 320, 320, 1, w);
+    float[] maskRow = new float[w];
     for (int y = 0; y < h; y++) {
       if (y % 32 == 0) checkCancelled();
       source.getPixels(out, 0, w, 0, y, w, 1);
       float fy = (float) y / Math.max(1, h - 1) * 319;
+      fingerField.row(y, h, maskRow);
       for (int x = 0; x < w; x++) {
-        float fx = (float) x / (w - 1) * 319;
-        if (ImageMath.field(mask, 320, 320, 1, fx, fy, 0) > .9f) {
+        if (maskRow[x] > .9f) {
+          float fx = (float) x / Math.max(1, w - 1) * 319;
           count++;
           out[x] =
               white

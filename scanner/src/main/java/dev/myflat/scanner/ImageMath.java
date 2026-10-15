@@ -106,39 +106,57 @@ public final class ImageMath {
   static Bitmap sharpen(Bitmap bitmap) {
     if (!bitmap.isMutable()) bitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true);
     int w = bitmap.getWidth(), h = bitmap.getHeight();
-    int[] previous = new int[w], current = new int[w], next = new int[w], out = new int[w];
+    int[] current = new int[w], next = new int[w], out = new int[w];
+    int[] previousBlur = new int[w * 3], currentBlur = new int[w * 3], nextBlur = new int[w * 3];
     bitmap.getPixels(current, 0, w, 0, 0, w, 1);
-    System.arraycopy(current, 0, previous, 0, w);
+    horizontalBlur(current, currentBlur);
+    System.arraycopy(currentBlur, 0, previousBlur, 0, currentBlur.length);
     bitmap.getPixels(next, 0, w, 0, Math.min(1, h - 1), w, 1);
-    int[] weights = {1, 2, 1};
+    horizontalBlur(next, nextBlur);
     for (int y = 0; y < h; y++) {
-      int[][] rows = {previous, current, next};
+      if ((y & 31) == 0 && Thread.currentThread().isInterrupted())
+        throw new java.util.concurrent.CancellationException();
       for (int x = 0; x < w; x++) {
-        float r = 0, g = 0, b = 0;
-        for (int yy = 0; yy < 3; yy++)
-          for (int xx = -1; xx <= 1; xx++) {
-            int v = rows[yy][Math.max(0, Math.min(w - 1, x + xx))],
-                q = weights[xx + 1] * weights[yy];
-            r += ((v >> 16) & 255) * q;
-            g += ((v >> 8) & 255) * q;
-            b += (v & 255) * q;
-          }
-        int v = current[x];
+        int i = x * 3, value = current[x];
+        float r = previousBlur[i] + 2 * currentBlur[i] + nextBlur[i];
+        float g = previousBlur[i + 1] + 2 * currentBlur[i + 1] + nextBlur[i + 1];
+        float b = previousBlur[i + 2] + 2 * currentBlur[i + 2] + nextBlur[i + 2];
         out[x] =
             rgb(
-                (2 * ((v >> 16) & 255) - r / 16) / 255,
-                (2 * ((v >> 8) & 255) - g / 16) / 255,
-                (2 * (v & 255) - b / 16) / 255);
+                (2 * ((value >> 16) & 255) - r / 16) / 255,
+                (2 * ((value >> 8) & 255) - g / 16) / 255,
+                (2 * (value & 255) - b / 16) / 255);
       }
       bitmap.setPixels(out, 0, w, 0, y, w, 1);
-      int[] old = previous;
-      previous = current;
+      int[] oldPixels = current;
       current = next;
-      next = old;
-      if (y + 2 < h) bitmap.getPixels(next, 0, w, 0, y + 2, w, 1);
-      else System.arraycopy(current, 0, next, 0, w);
+      next = oldPixels;
+      int[] oldBlur = previousBlur;
+      previousBlur = currentBlur;
+      currentBlur = nextBlur;
+      nextBlur = oldBlur;
+      if (y + 2 < h) {
+        bitmap.getPixels(next, 0, w, 0, y + 2, w, 1);
+        horizontalBlur(next, nextBlur);
+      } else {
+        System.arraycopy(current, 0, next, 0, w);
+        System.arraycopy(currentBlur, 0, nextBlur, 0, currentBlur.length);
+      }
     }
     return bitmap;
+  }
+
+  private static void horizontalBlur(int[] pixels, int[] out) {
+    int w = pixels.length;
+    for (int x = 0; x < w; x++) {
+      int left = pixels[Math.max(0, x - 1)],
+          center = pixels[x],
+          right = pixels[Math.min(w - 1, x + 1)];
+      int i = x * 3;
+      out[i] = ((left >> 16) & 255) + 2 * ((center >> 16) & 255) + ((right >> 16) & 255);
+      out[i + 1] = ((left >> 8) & 255) + 2 * ((center >> 8) & 255) + ((right >> 8) & 255);
+      out[i + 2] = (left & 255) + 2 * (center & 255) + (right & 255);
+    }
   }
 
   public interface Mapping {
@@ -157,6 +175,8 @@ public final class ImageMath {
   static Bitmap raster(Bitmap source, int width, int height, Mapping mapping) {
     return raster(
         new PixelSource() {
+          private int[] scratch;
+
           public int width() {
             return source.getWidth();
           }
@@ -166,9 +186,10 @@ public final class ImageMath {
           }
 
           public int[] read(Rect r) {
-            int[] pixels = new int[r.width() * r.height()];
-            source.getPixels(pixels, 0, r.width(), r.left, r.top, r.width(), r.height());
-            return pixels;
+            int count = r.width() * r.height();
+            if (scratch == null || scratch.length < count) scratch = new int[count];
+            source.getPixels(scratch, 0, r.width(), r.left, r.top, r.width(), r.height());
+            return scratch;
           }
         },
         width,
@@ -179,6 +200,8 @@ public final class ImageMath {
   static Bitmap raster(PixelSource source, int width, int height, Mapping mapping) {
     Bitmap result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
     int sw = source.width(), sh = source.height();
+    float[][] pointBuffers = new float[4][];
+    int[][] outputBuffers = new int[4][];
     for (int ty = 0; ty < height; ty += 256)
       for (int tx = 0; tx < width; tx += 256) {
         if (Thread.currentThread().isInterrupted()) {
@@ -186,7 +209,12 @@ public final class ImageMath {
           throw new java.util.concurrent.CancellationException();
         }
         int tw = Math.min(256, width - tx), th = Math.min(256, height - ty);
-        float[] points = new float[tw * th * 2];
+        int slot = (tw < 256 ? 1 : 0) | (th < 256 ? 2 : 0);
+        if (pointBuffers[slot] == null) {
+          pointBuffers[slot] = new float[tw * th * 2];
+          outputBuffers[slot] = new int[tw * th];
+        }
+        float[] points = pointBuffers[slot];
         for (int y = 0; y < th; y++)
           for (int x = 0; x < tw; x++) {
             int i = (y * tw + x) * 2;
@@ -207,7 +235,7 @@ public final class ImageMath {
             by = (int) top,
             bw = Math.min(sw - 1, (int) Math.ceil(right) + 1) - bx + 1,
             bh = Math.min(sh - 1, (int) Math.ceil(bottom) + 1) - by + 1;
-        int[] input = source.read(new Rect(bx, by, bx + bw, by + bh)), out = new int[tw * th];
+        int[] input = source.read(new Rect(bx, by, bx + bw, by + bh)), out = outputBuffers[slot];
         for (int i = 0; i < out.length; i++)
           out[i] = sample(input, bw, bh, points[i * 2] - bx, points[i * 2 + 1] - by);
         result.setPixels(out, 0, tw, tx, ty, tw, th);

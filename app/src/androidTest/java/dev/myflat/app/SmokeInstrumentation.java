@@ -323,6 +323,8 @@ public final class SmokeInstrumentation extends Instrumentation {
     DocumentStore.Page result = store.page(scanPage);
     require(result.width > 500 && result.width < 900 && result.height > 900, "完整书页扫描输出尺寸正确");
     testFullResolution(fixture);
+    dev.myflat.scanner.PixelKernelChecks.run(context);
+    require(true, "优化后的像素内核与原始公式逐像素一致，并保留取消处理能力");
     fixture.recycle();
   }
 
