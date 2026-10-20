@@ -355,7 +355,7 @@ final class Ui {
     @Override
     protected void onAttachedToWindow() {
       super.onAttachedToWindow();
-      AppAppearance.watch(this);
+      AppAppearance.watch(getRootView());
     }
   }
 
@@ -367,6 +367,12 @@ final class Ui {
       super(c);
       int id;
       switch (name) {
+        case "close":
+          id = R.drawable.myflat_ic_close;
+          break;
+        case "restore":
+          id = R.drawable.myflat_ic_restore;
+          break;
         case "move":
           id = R.drawable.myflat_ic_move;
           break;

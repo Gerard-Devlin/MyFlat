@@ -220,7 +220,8 @@ final class AppAppearance {
   }
 
   static void watch(View root) {
-    if (!watchers.containsKey(root)) {
+    if (watchers.containsKey(root)) return;
+    {
       watchers.put(root, Boolean.TRUE);
       class AppearanceObserver
           implements View.OnAttachStateChangeListener,
@@ -308,9 +309,20 @@ final class AppAppearance {
   static int color(Context c, int value) {
     if (!isDark(c)) return value;
     int alpha = Color.alpha(value), rgb = value & 0xffffff, mapped = rgb;
-    if (rgb == 0x000000 || rgb == 0x121212 || rgb == 0x171b26 || rgb == 0x3a3a3c) mapped = 0xffffff;
-    else if (rgb == 0x5c6c7d || rgb == 0x616161 || rgb == 0x777777 || rgb == 0x6a7886)
-      mapped = 0xbdbdbd;
+    if (rgb == 0x000000
+        || rgb == 0x121212
+        || rgb == 0x171b26
+        || rgb == 0x3a3a3c
+        || rgb == 0x212121
+        || rgb == 0x303030
+        || rgb == 0x424242) mapped = 0xffffff;
+    else if (rgb == 0x5c6c7d
+        || rgb == 0x616161
+        || rgb == 0x777777
+        || rgb == 0x6a7886
+        || rgb == 0x666666
+        || rgb == 0x757575
+        || rgb == 0x808080) mapped = 0xbdbdbd;
     else if (rgb == 0x8d8d93) mapped = 0x9e9e9e;
     else if (rgb == 0x30bfa5) mapped = 0x00b092;
     return (alpha << 24) | mapped;

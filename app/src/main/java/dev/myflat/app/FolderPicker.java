@@ -99,10 +99,13 @@ final class FolderPicker {
             cell.addView(cover, new LinearLayout.LayoutParams(-1, Math.round(width * 1.4142f)));
             TextView name = Ui.bold(a, f.name, 14);
             AppAppearance.keepText(name);
+            name.setMaxLines(2);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
             Ui.padding(name, 0, 8);
             cell.addView(name);
             LinearLayout detail = Ui.row(a);
             Ui.Icon pageIcon = new Ui.Icon(a, "page_count");
+            pageIcon.color = 0xffbdbdbd;
             detail.addView(pageIcon, new LinearLayout.LayoutParams(Ui.dp(a, 16), Ui.dp(a, 16)));
             detail.addView(Ui.text(a, locked ? "" : " " + count, 12, Ui.MUTED));
             cell.addView(detail);

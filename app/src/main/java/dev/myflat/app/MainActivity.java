@@ -77,6 +77,7 @@ public final class MainActivity extends Activity {
     refresh();
     if (Build.VERSION.SDK_INT >= 33
         && !getIntent().getBooleanExtra("import", false)
+        && !getIntent().hasExtra("shared_imports")
         && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED)
       requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 3);
@@ -85,7 +86,13 @@ public final class MainActivity extends Activity {
   }
 
   private void consumeImport() {
-    if (getIntent().getBooleanExtra("import", false)) {
+    ArrayList<String> shared = getIntent().getStringArrayListExtra("shared_imports");
+    if (shared != null) {
+      getIntent().removeExtra("shared_imports");
+      List<Uri> uris = new ArrayList<>();
+      for (String value : shared) uris.add(Uri.parse(value));
+      if (!uris.isEmpty()) importOptions(uris);
+    } else if (getIntent().getBooleanExtra("import", false)) {
       getIntent().removeExtra("import");
       pick();
     }
@@ -667,12 +674,14 @@ public final class MainActivity extends Activity {
   private void importOptions(List<Uri> uris) {
     ArrayList<String> values = new ArrayList<>();
     for (Uri uri : uris) values.add(uri.toString());
-    startActivityForResult(
+    Intent next =
         new Intent(this, ImportActivity.class)
             .putStringArrayListExtra("uris", values)
             .putExtra("folder", folderId)
-            .putExtra("document", documentId),
-        103);
+            .putExtra("document", documentId)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+    next.setClipData(getIntent().getClipData());
+    startActivityForResult(next, 103);
   }
 
   private ProgressDialog busy(String message) {

@@ -515,7 +515,8 @@ public final class ExportActivity extends Activity {
       } catch (Exception ignored) {
       }
     double factor = new double[] {.08, .18, .4, .7, 1}[q];
-    return String.format(Locale.getDefault(), "大约 %.1f MB", size * factor / 1048576d);
+    return "大约 "
+        + android.text.format.Formatter.formatShortFileSize(this, Math.round(size * factor));
   }
 
   private void addPages() {

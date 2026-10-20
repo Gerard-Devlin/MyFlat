@@ -23,7 +23,7 @@ public final class InterfaceInstrumentation extends Instrumentation {
   private String document;
   private long folder;
   private File photo;
-  private boolean workflowsOnly, resolutionOnly;
+  private boolean workflowsOnly, resolutionOnly, panelsOnly;
 
   private void safeOnMain(Runnable action) {
     java.util.concurrent.atomic.AtomicReference<Throwable> failed =
@@ -44,6 +44,7 @@ public final class InterfaceInstrumentation extends Instrumentation {
   @Override
   public void onCreate(Bundle args) {
     super.onCreate(args);
+    panelsOnly = "true".equals(args.getString("panels_only", "false"));
     workflowsOnly = "true".equals(args.getString("workflows_only", "false"));
     resolutionOnly = "true".equals(args.getString("resolution_only", "false"));
     start();
@@ -63,6 +64,12 @@ public final class InterfaceInstrumentation extends Instrumentation {
           .commit();
       launch(MainActivity.class, new Intent());
       store = MyFlatApp.of(context).store;
+      if (panelsOnly) {
+        new UiPanelChecks(this, activities.get(0)).run();
+        result.putString("stream", "UI panel checks passed");
+        finish(Activity.RESULT_OK, result);
+        return;
+      }
       if (resolutionOnly) {
         new WorkflowChecks(this).resolutionChecksOnly();
         result.putString("stream", "Resolution checks passed");

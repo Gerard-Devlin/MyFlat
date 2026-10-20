@@ -116,6 +116,11 @@ final class ActionMenus {
     title.setGravity(Gravity.CENTER_VERTICAL);
     title.setTypeface(android.graphics.Typeface.DEFAULT);
     root.addView(head);
+    ScrollView scroll = new ScrollView(a);
+    scroll.setFillViewport(true);
+    LinearLayout content = Ui.column(a);
+    scroll.addView(content);
+    root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
     LinearLayout current = Ui.column(a);
     GradientDrawable currentBackground = Ui.shape(Color.WHITE, 0);
     float bottomRadius = Ui.dp(a, 20);
@@ -138,14 +143,14 @@ final class ActionMenus {
     description.setGravity(Gravity.CENTER);
     Ui.padding(description, 24, 24);
     current.addView(description);
-    root.addView(current);
+    content.addView(current);
     TextView more = Ui.bold(a, "提供菜单", 12);
     Ui.padding(more, 24, 0);
     more.setTextColor(0xff616161);
     more.setGravity(Gravity.CENTER_VERTICAL);
-    root.addView(more, new LinearLayout.LayoutParams(-1, Ui.dp(a, 44)));
+    content.addView(more, new LinearLayout.LayoutParams(-1, Ui.dp(a, 44)));
     LinearLayout extra = Ui.column(a);
-    root.addView(extra, new LinearLayout.LayoutParams(-1, 0, 1));
+    content.addView(extra, new LinearLayout.LayoutParams(-1, -2));
     List<Item> active = new ArrayList<>(order);
     Runnable[] render = new Runnable[1];
     render[0] =
@@ -214,7 +219,7 @@ final class ActionMenus {
     TextView reset =
         Ui.pill(
             a,
-            "重启",
+            "重置",
             true,
             () -> {
               active.clear();

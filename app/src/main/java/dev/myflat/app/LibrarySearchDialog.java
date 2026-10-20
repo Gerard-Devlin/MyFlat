@@ -23,6 +23,10 @@ final class LibrarySearchDialog {
     head.addView(Ui.iconButton(a, "back", "返回", dialog::dismiss));
     long[] filter = {scope};
     TextView chip = Ui.text(a, "", 13, Ui.INK);
+    chip.setSingleLine(true);
+    chip.setMaxWidth(Ui.dp(a, 120));
+    chip.setEllipsize(android.text.TextUtils.TruncateAt.END);
+    AppAppearance.keepText(chip);
     Ui.padding(chip, 8, 4);
     chip.setBackground(Ui.shape(0xffeeeeee, Ui.dp(a, 16)));
     for (DocumentStore.Folder f : MyFlatApp.of(a).store.folders())

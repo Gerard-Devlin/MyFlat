@@ -24,6 +24,11 @@ public final class WelcomeActivity extends Activity {
   public void onCreate(Bundle state) {
     AppAppearance.prepare(this);
     super.onCreate(state);
+    if (SharedImports.accepts(getIntent()) && SharedImports.collect(this, getIntent()).isEmpty()) {
+      Toast.makeText(this, "请选择可读取的图片或 PDF", Toast.LENGTH_LONG).show();
+      finish();
+      return;
+    }
     if (getSharedPreferences("welcome", 0).getBoolean("accepted", false)) {
       begin();
       return;
@@ -62,14 +67,18 @@ public final class WelcomeActivity extends Activity {
     row.addView(Ui.text(this, title, 14, Ui.INK), new LinearLayout.LayoutParams(0, -2, 1));
     TextView more = Ui.bold(this, "查看更多", 14);
     more.setTextColor(Ui.GREEN);
-    Ui.padding(more, 12, 12);
+    Ui.padding(more, 12, 0);
+    more.setGravity(Gravity.CENTER);
     more.setOnClickListener(v -> click.run());
     row.addView(more, new LinearLayout.LayoutParams(-2, Ui.dp(this, 36)));
     body.addView(row);
   }
 
   private void begin() {
-    startActivity(new Intent(this, CameraActivity.class));
+    java.util.ArrayList<android.net.Uri> shared = SharedImports.collect(this, getIntent());
+    Intent next = new Intent(this, shared.isEmpty() ? CameraActivity.class : MainActivity.class);
+    if (!shared.isEmpty()) SharedImports.forward(next, shared);
+    startActivity(next);
     finish();
   }
 

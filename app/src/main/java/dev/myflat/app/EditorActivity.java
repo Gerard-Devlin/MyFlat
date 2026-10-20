@@ -160,7 +160,7 @@ public final class EditorActivity extends Activity {
         lp.leftMargin = Ui.dp(this, 16);
         header.addView(title, lp);
       } else header.addView(new Space(this), new LinearLayout.LayoutParams(0, 1, 1));
-      editReset = headerText("重启", () -> build(mode));
+      editReset = headerText("重置", () -> build(mode));
       header.addView(editReset);
       editDone = headerText("完成", this::saveEdit);
       header.addView(editDone);
